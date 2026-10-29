@@ -67,6 +67,9 @@ impl Component for Animator {
 struct FlyCamera {
     keys: [bool; 10], // W A S D Q E Left Right Up Down
     angles: Angles,
+    /// The camera is placed by the game (a network client's predicted player): arrow keys still look around, WASD / QE
+    /// no longer fly.
+    follow: bool,
 }
 
 impl Component for FlyCamera {
@@ -84,7 +87,9 @@ impl Component for FlyCamera {
         let mut t = scene.local_transform(h.go);
         t.rotation = rot;
         let wish = rot.forward() * (b(0) - b(2)) + rot.left() * (b(1) - b(3)) + Vec3::Z * (b(5) - b(4));
-        t.position += wish * 300.0 * dt;
+        if !self.follow {
+            t.position += wish * 300.0 * dt;
+        }
         scene.set_local_transform(h.go, t);
     }
     impl_component_any!();
@@ -112,7 +117,7 @@ struct App {
 /// `--host <addr>` serves the physics props to clients; `--join <addr>` mirrors a server's props.
 enum Net {
     Host(sbox_net::Server, sbox_net::replication::RemotePlayers),
-    Join(sbox_net::Client, Instant, sbox_net::replication::Prediction),
+    Join(sbox_net::Client, Instant, sbox_net::replication::Prediction, sbox_net::replication::Interpolator),
 }
 
 impl App {
@@ -295,7 +300,7 @@ impl App {
                 p.enabled = false;
             }
             match sbox_net::Client::connect(&addr, "player") {
-                Ok(c) => return Some(Net::Join(c, Instant::now(), Default::default())),
+                Ok(c) => return Some(Net::Join(c, Instant::now(), Default::default(), Default::default())),
                 Err(e) => log::error!("--join {addr}: {e:#}"),
             }
         }
@@ -315,8 +320,8 @@ impl App {
                 }
                 server.broadcast(&sbox_net::replication::collect(&self.scene));
             }
-            Some(Net::Join(client, last_try, prediction)) => {
-                use sbox_net::replication::{apply_except, PLAYER_ID_BASE};
+            Some(Net::Join(client, last_try, prediction, interp)) => {
+                use sbox_net::replication::{apply_except, apply_interpolated, PLAYER_ID_BASE};
                 client.poll();
                 let mut own = None;
                 if client.client_id.is_none() && last_try.elapsed().as_secs_f32() > 0.5 {
@@ -335,9 +340,22 @@ impl App {
                             t.position = p;
                             self.scene.set_world_transform(go, t);
                         }
+                        // The camera rides on the predicted player (its origin is the eye, as spawned).
+                        if let Some(cam) = self.camera {
+                            let mut c = self.scene.world_transform(cam);
+                            c.position = p;
+                            self.scene.set_world_transform(cam, c);
+                            if let Some(f) = self.scene.component_mut::<FlyCamera>(cam) {
+                                f.follow = true;
+                            }
+                        }
                     }
                 }
-                apply_except(&mut self.scene, client, 0.3, own);
+                // Other objects: create what is missing, then show them slightly in the past, blended between snapshots.
+                apply_except(&mut self.scene, client, 0.0, own);
+                interp.advance(dt);
+                interp.record(client);
+                apply_interpolated(&mut self.scene, interp, own);
             }
             None => {}
         }

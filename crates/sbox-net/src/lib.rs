@@ -349,6 +349,8 @@ pub struct Client {
     pub last_tick: u32,
     /// Last input the server reported as applied.
     pub ack: u32,
+    /// Number of snapshot packets applied so far.
+    pub snapshots: u32,
     /// Latest known state of every entity, by id.
     pub entities: HashMap<u32, EntityState>,
     seq: u32,
@@ -363,7 +365,7 @@ impl Client {
         socket.connect(server)?;
         socket.set_nonblocking(true)?;
         socket.send(&Packet::Connect { name: name.to_string() }.encode())?;
-        Ok(Self { socket, client_id: None, last_tick: 0, ack: 0, entities: HashMap::new(), seq: 0, out: Outbox::default(), inbox: Inbox::default(), rpcs: Vec::new() })
+        Ok(Self { socket, client_id: None, last_tick: 0, ack: 0, snapshots: 0, entities: HashMap::new(), seq: 0, out: Outbox::default(), inbox: Inbox::default(), rpcs: Vec::new() })
     }
 
     /// Re-send the handshake (call periodically until [`Client::client_id`] is set).
@@ -398,6 +400,7 @@ impl Client {
                 Ok(Packet::Snapshot { tick, ack, entities }) if tick >= self.last_tick => {
                     self.last_tick = tick;
                     self.ack = self.ack.max(ack);
+                    self.snapshots += 1;
                     for e in entities {
                         self.entities.insert(e.id, e);
                     }
@@ -505,6 +508,42 @@ mod tests {
             client.poll();
             client.ack == 3
         }));
+    }
+
+    #[test]
+    fn interpolation_blends_between_snapshots_a_little_in_the_past() {
+        use super::replication::Interpolator;
+        let mut server = Server::bind("127.0.0.1:0").unwrap();
+        let mut client = Client::connect(&server.local_addr().unwrap().to_string(), "c").unwrap();
+        assert!(wait(|| {
+            server.poll();
+            client.poll();
+            client.client_id.is_some()
+        }));
+        let mut it = Interpolator::default();
+        assert!(it.sample(7).is_none(), "nothing recorded");
+        let at = |x: f32| EntityState { id: 7, position: [x, 0.0, 0.0], rotation: [0.0, 0.0, 0.0, 1.0] };
+        // Snapshots at t = 0 (x = 0) and t = 0.1 (x = 100); `snapshots` marks each arrival.
+        client.entities.insert(7, at(0.0));
+        client.snapshots += 1;
+        it.record(&client);
+        it.advance(0.1);
+        client.entities.insert(7, at(100.0));
+        client.snapshots += 1;
+        it.record(&client);
+        // Now = 0.1, delay 0.1 -> shown at t = 0: the first snapshot.
+        assert_eq!(it.sample(7).unwrap().0.x, 0.0);
+        it.advance(0.05);
+        let x = it.sample(7).unwrap().0.x;
+        assert!((x - 50.0).abs() < 1e-3, "halfway between the snapshots, got {x}");
+        it.advance(0.05);
+        assert!((it.sample(7).unwrap().0.x - 100.0).abs() < 1e-3);
+        // Past the newest snapshot it holds still instead of extrapolating.
+        it.advance(1.0);
+        assert_eq!(it.sample(7).unwrap().0.x, 100.0);
+        // Recording without new snapshots changes nothing.
+        it.record(&client);
+        assert_eq!(it.sample(7).unwrap().0.x, 100.0);
     }
 
     #[test]
@@ -746,6 +785,76 @@ pub mod replication {
 
         pub fn pending(&self) -> usize {
             self.pending.len()
+        }
+    }
+
+    /// Snapshot history for smooth remote motion: objects are shown `delay` seconds in the past, blended between the two
+    /// snapshots around that moment. Time is the sum of the `dt`s passed to [`Interpolator::advance`].
+    pub struct Interpolator {
+        pub delay: f32,
+        now: f32,
+        seen: u32,
+        samples: HashMap<u32, std::collections::VecDeque<(f32, Vec3, Quat)>>,
+    }
+
+    impl Default for Interpolator {
+        fn default() -> Self {
+            Self { delay: 0.1, now: 0.0, seen: 0, samples: HashMap::new() }
+        }
+    }
+
+    impl Interpolator {
+        pub fn advance(&mut self, dt: f32) {
+            self.now += dt;
+        }
+
+        /// Remember the client's entity states when new snapshot packets have arrived since the last call.
+        pub fn record(&mut self, client: &Client) {
+            if client.snapshots == self.seen {
+                return;
+            }
+            self.seen = client.snapshots;
+            for e in client.entities.values() {
+                let q = self.samples.entry(e.id).or_default();
+                let (p, r) = (Vec3::from(e.position), Quat::from_array(e.rotation).normalize());
+                // Several packets of one snapshot (or a repeat) may land in the same frame: keep the newest.
+                if q.back().is_some_and(|(t, ..)| *t >= self.now) {
+                    q.pop_back();
+                }
+                q.push_back((self.now, p, r));
+            }
+        }
+
+        /// State of `id` at the delayed render time; before the first sample it is the first one, after the last one the
+        /// last one (no extrapolation).
+        pub fn sample(&mut self, id: u32) -> Option<(Vec3, Quat)> {
+            let target = self.now - self.delay;
+            let q = self.samples.get_mut(&id)?;
+            // Drop samples that can no longer be needed, keeping the one at or before the target.
+            while q.len() > 2 && q[1].0 <= target {
+                q.pop_front();
+            }
+            let (t0, p0, r0) = *q.front()?;
+            let Some(&(t1, p1, r1)) = q.get(1) else { return Some((p0, r0)) };
+            if target <= t0 {
+                return Some((p0, r0));
+            }
+            let k = ((target - t0) / (t1 - t0).max(1e-4)).clamp(0.0, 1.0);
+            Some((p0.lerp(p1, k), r0.slerp(r1, k)))
+        }
+    }
+
+    /// Move networked objects to their interpolated state (all but `skip`, the predicted local player).
+    pub fn apply_interpolated(scene: &mut Scene, interp: &mut Interpolator, skip: Option<u32>) {
+        // Objects for newly reported players are created by `apply_except`; this only moves existing ones.
+        let ids: Vec<_> = scene.iter_components::<NetworkId>().filter(|(_, n)| Some(n.0) != skip).map(|(go, n)| (go, n.0)).collect();
+        for (go, id) in ids {
+            if let Some((p, r)) = interp.sample(id) {
+                let mut t = scene.world_transform(go);
+                t.position = p;
+                t.rotation = r;
+                scene.set_world_transform(go, t);
+            }
         }
     }
 
