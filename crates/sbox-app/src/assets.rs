@@ -108,7 +108,7 @@ impl Assets {
         if let Some(m) = self.models.get(key) {
             return m.clone();
         }
-        let loaded = match model::load(bytes) {
+        let loaded = match model::load_with(bytes, &|p| self.fs.as_ref().and_then(|f| f.read(p))) {
             Ok(md) => {
                 let (mut mins, mut maxs) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
                 let mut parts = Vec::new();

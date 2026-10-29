@@ -179,12 +179,12 @@ impl App {
     fn build_model_scene(scene: &mut Scene, r: &mut Renderer, path: &str, anim_path: Option<&str>) -> sbox_scene::GoId {
         use sbox_resource::{anim, model, vmat};
         let bytes = std::fs::read(path).expect("read model");
-        let md = model::load(&bytes).expect("load model");
+        let game_dir = std::path::Path::new(path).ancestors().find(|p| p.file_name().map_or(false, |n| n == "game"));
+        let fs = game_dir.map(vmat::GameFs::from_game_dir);
+        let md = model::load_with(&bytes, &|p| fs.as_ref().and_then(|f| f.read(p))).expect("load model");
         let meshes: Vec<_> = md.default_meshes().collect();
         log::info!("{path}: {} meshes ({} shown), {} bones", md.meshes.len(), meshes.len(), md.skeleton.len());
 
-        let game_dir = std::path::Path::new(path).ancestors().find(|p| p.file_name().map_or(false, |n| n == "game"));
-        let fs = game_dir.map(vmat::GameFs::from_game_dir);
         let mut assets = Assets::new(fs);
         let loaded = assets.load_model_bytes(r, path, &bytes).expect("model has no drawable meshes");
         let _ = &md;

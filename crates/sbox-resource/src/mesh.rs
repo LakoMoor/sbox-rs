@@ -226,7 +226,7 @@ pub fn load_embedded(file: &[u8]) -> Result<RenderMesh> {
     } else {
         kv3::parse(res.block_data("DATA").ok_or_else(|| anyhow!("no mesh data block"))?)?
     };
-    let mbuf = res.block_data("MBUF").ok_or_else(|| anyhow!("no MBUF block"))?;
+    let mbuf = res.block_data("MBUF").or_else(|| res.block_data("VBIB")).ok_or_else(|| anyhow!("no MBUF/VBIB block"))?;
     let vbib = crate::vbib::parse(mbuf)?;
     build(&kv, &vbib)
 }

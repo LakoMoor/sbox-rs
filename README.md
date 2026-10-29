@@ -32,7 +32,7 @@ Checked on the `game/` directory produced by the official `Setup` step:
 - Resource container: 6878 / 6878 files
 - KV3 blocks: 7014 / 7014 (including external LZ4-linked blob blocks)
 - `vtex_c` textures: 2618 / 2618, mip sizes match byte for byte
-- `vmdl_c` meshes: 743 / 744 (about 3 million triangles), normals decode to unit length
+- `vmdl_c` meshes: 744 / 744 (about 3 million triangles; external `vmesh_c` references are resolved through the game file system), normals decode to unit length
 - `anim_c` clips: 1284 / 1284 parse; skinned playback of the citizen character verified visually. 198 clips show large frame-to-frame rotation jumps, some from genuinely fast motion, some possibly decoder edge cases
 
 ### Not done yet
@@ -40,7 +40,7 @@ Checked on the `game/` directory produced by the official `Setup` step:
 - Prefabs (`prefab_c`, same JSON as scenes with a `RootObject`) all 58 load, and their particles are simulated (sphere / cone emitters, curves, additive or alpha billboards), with sprite-sheet frames decoded from the `vtex_c` extra data (cell origins; frame chosen by particle age, not by the authored sequence curves), but collisions, trails, `Decal` and post-processing are ignored
 
 - Animation graphs are evaluated in a reduced form (poses are computed per node: sequence, blend, 2D blend, selector, state machines with parameter/time/tag conditions, `Subtract` / `Add` additive layers; the additive convention `base * delta` is unverified against the real engine); bone-mask nodes blend per bone using the citizen weight lists read from the model source `.vmdl_prefab` (parent blend space only; the model-space variants are treated the same), IK, look-at / aim, root motion and in-model (`ANIM` block) animations are not
-- External `vmesh_c` references, `.shader_c` shaders (materials are approximated by a fixed PBR shader)
+- `.shader_c` shaders (materials are approximated by a fixed PBR shader)
 - VPK, audio (`vsnd_c`), input system, networking, UI
 - Prefab instances/variables, most scene component types (only models, lights, camera, rigidbody and colliders are mapped)
 - Scripting: s&box game code is C#; it needs either a Rust API or an embedded .NET runtime
@@ -98,7 +98,7 @@ cargo run --release -p sbox-resource --example survey -- path/to/game
 ## Roadmap
 
 1. Animation graphs, additive clips, root motion; clothing (`clothing_c`) and mesh groups
-2. `vmesh_c` references, real shader translation
+2. Real shader translation (`vmesh_c` references done)
 3. VPK and a proper virtual file system
 4. Scene / prefab loading (`*.scene`, `*.prefab`)
 5. Input + character controller, audio, networking, UI

@@ -120,6 +120,11 @@ fn f32s<const N: usize>(v: &Value) -> [f32; N] {
 }
 
 pub fn load(file: &[u8]) -> Result<Model> {
+    load_with(file, &|_| None)
+}
+
+/// Like [`load`], resolving external `m_refMeshes` (`*.vmesh`) through `read` (given the compiled `*.vmesh_c` path).
+pub fn load_with(file: &[u8], read: &dyn Fn(&str) -> Option<Vec<u8>>) -> Result<Model> {
     let res = Resource::parse(file)?;
     let kv = kv3::parse(res.block_data("DATA").ok_or_else(|| anyhow!("no DATA"))?)?;
 
@@ -142,14 +147,27 @@ pub fn load(file: &[u8]) -> Result<Model> {
     // Embedded meshes: MDAT / MBUF pairs in file order.
     let mdats: Vec<&crate::Block> = res.blocks.iter().filter(|b| &b.kind == b"MDAT").collect();
     let mbufs: Vec<&crate::Block> = res.blocks.iter().filter(|b| &b.kind == b"MBUF").collect();
-    for (i, (md, mb)) in mdats.iter().zip(&mbufs).enumerate() {
-        let mesh_kv = kv3::parse(&file[md.start..md.start + md.len])?;
-        let vb = vbib::parse(&file[mb.start..mb.start + mb.len])?;
+    let ref_meshes: Vec<String> = kv.get("m_refMeshes").and_then(Value::as_array).unwrap_or(&[]).iter().filter_map(Value::as_str).map(String::from).collect();
+    let mut embedded = mdats.iter().zip(&mbufs);
+    for i in 0..ref_meshes.len().max(mdats.len()) {
         let remap_slice = starts.get(i).map(|&s| {
             let end = starts.get(i + 1).map_or(remap.len(), |&e| e as usize);
             &remap[(s as usize).min(remap.len())..end.min(remap.len())]
         });
-        let mesh = mesh::build_with_remap(&mesh_kv, &vb, remap_slice.filter(|r| !r.is_empty()))?;
+        let remap_slice = remap_slice.filter(|r| !r.is_empty());
+        let ext = ref_meshes.get(i).filter(|n| !n.is_empty());
+        let mesh = if let Some(name) = ext {
+            let Some(bytes) = read(&format!("{name}_c")) else { continue };
+            match mesh::load_embedded(&bytes) {
+                Ok(m) => m,
+                Err(_) => continue,
+            }
+        } else {
+            let Some((md, mb)) = embedded.next() else { continue };
+            let mesh_kv = kv3::parse(&file[md.start..md.start + md.len])?;
+            let vb = vbib::parse(&file[mb.start..mb.start + mb.len])?;
+            mesh::build_with_remap(&mesh_kv, &vb, remap_slice)?
+        };
         model.meshes.push(ModelMesh {
             mesh,
             group_mask: group_masks.get(i).copied().unwrap_or(-1),
