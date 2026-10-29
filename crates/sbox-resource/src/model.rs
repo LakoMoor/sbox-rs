@@ -60,12 +60,19 @@ impl Skeleton {
         let bind = self.bind_world();
         let by_name: std::collections::HashMap<&str, usize> =
             anim_skel.names.iter().take(n).enumerate().map(|(i, nm)| (nm.as_str(), i)).collect();
-        (0..self.len())
-            .map(|i| match by_name.get(self.names[i].as_str()) {
-                Some(&j) => (world[j] * bind[i].inverse()).to_cols_array_2d(),
-                None => Mat4::IDENTITY.to_cols_array_2d(),
-            })
-            .collect()
+        // Bones the animation skeleton lacks (ears, eyes, helpers) follow their nearest animated ancestor.
+        let mut skin: Vec<Mat4> = Vec::with_capacity(self.len());
+        for i in 0..self.len() {
+            let m = match by_name.get(self.names[i].as_str()) {
+                Some(&j) => world[j] * bind[i].inverse(),
+                None => match self.parents.get(i) {
+                    Some(&p) if p >= 0 && (p as usize) < i => skin[p as usize],
+                    _ => Mat4::IDENTITY,
+                },
+            };
+            skin.push(m);
+        }
+        skin.iter().map(Mat4::to_cols_array_2d).collect()
     }
 }
 
