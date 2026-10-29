@@ -129,7 +129,7 @@ Done (see "Not done yet" for the approximations): scene / prefab loading, maps f
 
 Open, in rough order of value:
 
-1. More map entity classes (`func_shatterglass`, `light_ortho`; `phys_hinge` only occurs inside model physics data (`[PR#]part` targets) and needs `vphys_c` part bodies; light probe volumes need baked GI, which is not ported); the `vents_c` format itself is decoded
+1. More map entity classes (`func_shatterglass` is spawned as a static model prop without breaking and `light_ortho` as a wide spot light, both approximations; `phys_hinge` only occurs inside model physics data (`[PR#]part` targets) and needs `vphys_c` part bodies; light probe volumes need baked GI, which is not ported); the `vents_c` format itself is decoded
 2. `ScreenSpaceReflections`
 3. UI beyond the basic panels / buttons / text fields: layout, scrolling, caret and selection, and `ScreenPanel` / `WorldPanel` (Razor) compatibility
 4. Real shader translation: `.shader_c` is compiled GPU bytecode, so this means re-implementing the shaders by hand per material family

@@ -625,6 +625,12 @@ impl Assets {
                     sbox_scene::SpotLight { color: rgb(e), radius: e.float("range").unwrap_or(512.0), intensity: 1.0, cone_inner: e.float("innerconeangle").unwrap_or(30.0).min(outer), cone_outer: outer },
                 );
             }
+            "light_ortho" => {
+                // Approximation: an orthographic (parallel-beam) light is drawn as a wide spot light.
+                let go = scene.create_object("light_ortho");
+                scene.set_local_transform(go, Transform::new(transform.position, rotation, Vec3::ONE));
+                scene.add_component(go, sbox_scene::SpotLight { color: rgb(e), radius: e.float("range").unwrap_or(512.0), intensity: 1.0, cone_inner: 50.0, cone_outer: 70.0 });
+            }
             "env_sky" => {
                 if let Some(mat) = e.string("skyname").filter(|s| !s.is_empty()) {
                     let t = e.color("tint_color").unwrap_or([255; 4]);
@@ -648,7 +654,7 @@ impl Assets {
                     info.player_start = Some((transform.position, yaw));
                 }
             }
-            "prop_physics" | "prop_dynamic" | "prop_static" => {
+            "prop_physics" | "prop_dynamic" | "prop_static" | "func_shatterglass" => {
                 let Some(model) = e.string("model").filter(|s| !s.is_empty()) else { return };
                 let Some(m) = self.load_model(r, &model.replace('\\', "/")) else { return };
                 let go = scene.create_object("prop");

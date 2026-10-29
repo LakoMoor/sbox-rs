@@ -3,7 +3,7 @@ use sbox_resource::{vents, vpk::Vpk};
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     let v = Vpk::open(std::path::Path::new(&a[1])).unwrap();
-    let names = ["attach1","attach2","hingeaxis","minangle","maxangle","limitmin","limitmax","parentname","model","initialangle","friction","breakable","spawnflags","origin","angles","scales","targetname","box_mins","box_maxs","fogstrength","falloffexponent","shape","fadeinstart","fadeinend","drawdistance","anisotropy","indirectstrength","color","rendercolor","enabled","skyname"];
+    let names = ["rendermode","renderamt","dimensions","size","width","height","glasswidth","glassheight","material","fov","orthowidth","orthoheight","nearclip","farclip","lightcolor","range","brightness","castshadows","enabled","shadowmapsize","attach1","attach2","hingeaxis","minangle","maxangle","limitmin","limitmax","parentname","model","initialangle","friction","breakable","spawnflags","origin","angles","scales","targetname","box_mins","box_maxs","fogstrength","falloffexponent","shape","fadeinstart","fadeinend","drawdistance","anisotropy","indirectstrength","color","rendercolor","enabled","skyname"];
     for name in v.entries.keys().filter(|k| k.ends_with(".vents_c")) {
         for e in vents::load(&v.read(name).unwrap()).unwrap_or_default() {
             if !e.classname().starts_with(a[2].as_str()) { continue }
