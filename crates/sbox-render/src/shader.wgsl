@@ -6,6 +6,7 @@ struct Globals {
     ambient: vec4<f32>,
     point_pos: array<vec4<f32>, 8>,   // xyz, radius
     point_color: array<vec4<f32>, 8>, // rgb * intensity
+    point_dir: array<vec4<f32>, 8>,   // xyz = spot direction, w = cos(outer) or -2 for point lights
     counts: vec4<u32>,                // x = point light count
     light_vp: mat4x4<f32>,
     shadow: vec4<f32>,                // x = enabled, y = 1 / map size
@@ -197,7 +198,12 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let to_l = g.point_pos[i].xyz - in.world_pos;
         let d = length(to_l);
         let att = clamp(1.0 - d / g.point_pos[i].w, 0.0, 1.0);
-        color += shade(n, v, to_l / max(d, 0.001), g.point_color[i].rgb * att * att, albedo, rough, metal);
+        let l_dir = to_l / max(d, 0.001);
+        var cone = 1.0;
+        if (g.point_dir[i].w > -1.5) {
+            cone = smoothstep(g.point_dir[i].w, max(g.point_color[i].w, g.point_dir[i].w + 0.001), dot(-l_dir, g.point_dir[i].xyz));
+        }
+        color += shade(n, v, l_dir, g.point_color[i].rgb * att * att * cone, albedo, rough, metal);
     }
     if ((flags & 4u) != 0u) {
         return vec4<f32>(albedo, obj.tint.a * albedo4.a);

@@ -288,7 +288,17 @@ impl ComponentLoader for SceneLoader<'_> {
                 scene.add_component(go, DirectionalLight { color: [c[0], c[1], c[2]], ambient: [a[0], a[1], a[2]] });
                 true
             }
-            "PointLight" | "SpotLight" => {
+            "SpotLight" => {
+                let c = parse_color(p.get("LightColor"), [1.0; 4]);
+                let f = |k: &str, d: f64| p.get(k).and_then(Value::as_f64).unwrap_or(d) as f32;
+                let outer = f("ConeOuter", 45.0);
+                scene.add_component(
+                    go,
+                    sbox_scene::SpotLight { color: [c[0], c[1], c[2]], radius: f("Radius", 400.0), intensity: 1.0, cone_inner: f("ConeInner", 15.0).min(outer), cone_outer: outer },
+                );
+                true
+            }
+            "PointLight" => {
                 let c = parse_color(p.get("LightColor"), [1.0; 4]);
                 let radius = p.get("Radius").and_then(Value::as_f64).unwrap_or(400.0) as f32;
                 scene.add_component(go, PointLight { color: [c[0], c[1], c[2]], radius, intensity: 1.0 });

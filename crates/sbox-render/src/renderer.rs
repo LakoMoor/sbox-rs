@@ -3,7 +3,7 @@ use anyhow::{anyhow, Result};
 use bytemuck::{Pod, Zeroable};
 use sbox_math::{sbox_to_view, Mat4, RotationExt, Transform, Vec3};
 use sbox_resource::vtex::{TexFormat, Texture};
-use sbox_scene::{CameraComponent, DirectionalLight, MaterialId, MeshId, ModelRenderer, PointLight, Scene};
+use sbox_scene::{CameraComponent, DirectionalLight, MaterialId, MeshId, ModelRenderer, PointLight, Scene, SpotLight};
 use wgpu::util::DeviceExt;
 
 const MAX_POINT_LIGHTS: usize = 8;
@@ -23,6 +23,8 @@ struct Globals {
     ambient: [f32; 4],
     point_pos: [[f32; 4]; MAX_POINT_LIGHTS],
     point_color: [[f32; 4]; MAX_POINT_LIGHTS],
+    /// xyz = spot direction, w = cos(outer cone), or -2 for a point light.
+    point_dir: [[f32; 4]; MAX_POINT_LIGHTS],
     counts: [u32; 4],
     light_vp: [[f32; 4]; 4],
     shadow: [f32; 4], // x = enabled, y = 1 / map size
@@ -865,6 +867,20 @@ impl Renderer {
             let p = scene.world_transform(go).position;
             globals.point_pos[np] = [p.x, p.y, p.z, l.radius];
             globals.point_color[np] = [l.color[0] * l.intensity, l.color[1] * l.intensity, l.color[2] * l.intensity, 1.0];
+            globals.point_dir[np] = [0.0, 0.0, 0.0, -2.0];
+            np += 1;
+        }
+        for (go, l) in scene.iter_components::<SpotLight>() {
+            if np >= MAX_POINT_LIGHTS {
+                break;
+            }
+            let t = scene.world_transform(go);
+            let dir = t.rotation * Vec3::X;
+            let outer = l.cone_outer.clamp(1.0, 89.0).to_radians();
+            let inner = l.cone_inner.clamp(0.0, l.cone_outer).to_radians();
+            globals.point_pos[np] = [t.position.x, t.position.y, t.position.z, l.radius];
+            globals.point_color[np] = [l.color[0] * l.intensity, l.color[1] * l.intensity, l.color[2] * l.intensity, inner.cos()];
+            globals.point_dir[np] = [dir.x, dir.y, dir.z, outer.cos()];
             np += 1;
         }
         globals.counts[0] = np as u32;

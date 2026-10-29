@@ -71,6 +71,21 @@ impl Component for DirectionalLight {
     impl_component_any!();
 }
 
+/// Cone light shining along the object's forward (+X) axis; angles are half-angles in degrees.
+pub struct SpotLight {
+    pub color: [f32; 3],
+    pub radius: f32,
+    pub intensity: f32,
+    pub cone_inner: f32,
+    pub cone_outer: f32,
+}
+
+impl Default for SpotLight {
+    fn default() -> Self {
+        Self { color: [1.0; 3], radius: 400.0, intensity: 1.0, cone_inner: 15.0, cone_outer: 45.0 }
+    }
+}
+
 /// `PointLight`
 pub struct PointLight {
     pub color: [f32; 3],
@@ -85,6 +100,10 @@ impl Default for PointLight {
 }
 
 impl Component for PointLight {
+    impl_component_any!();
+}
+
+impl Component for SpotLight {
     impl_component_any!();
 }
 
