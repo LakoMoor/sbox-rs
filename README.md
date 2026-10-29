@@ -39,7 +39,7 @@ Checked on the `game/` directory produced by the official `Setup` step:
 
 - Prefabs (`prefab_c`, same JSON as scenes with a `RootObject`) all 58 load, and their particles are simulated (sphere / cone emitters, curves, additive or alpha billboards), with sprite-sheet frames decoded from the `vtex_c` extra data (cell origins; frame chosen by particle age, not by the authored sequence curves), but collisions, trails, `Decal` and post-processing are ignored
 
-- Animation graphs are evaluated in a reduced form (sequence, blend, 2D blend, selector, state machines with parameter/time/tag conditions); additive layers (the graph builds deltas with `Subtract` nodes, so they need per-node poses rather than the current weighted clip list; a naive attempt corrupts the pose), bone masks, IK, look-at / aim, root motion and in-model (`ANIM` block) animations are not
+- Animation graphs are evaluated in a reduced form (poses are computed per node: sequence, blend, 2D blend, selector, state machines with parameter/time/tag conditions, `Subtract` / `Add` additive layers; the additive convention `base * delta` is unverified against the real engine); bone masks (the mask node passes its first input through), IK, look-at / aim, root motion and in-model (`ANIM` block) animations are not
 - External `vmesh_c` references, `.shader_c` shaders (materials are approximated by a fixed PBR shader)
 - VPK, audio (`vsnd_c`), input system, networking, UI
 - Prefab instances/variables, most scene component types (only models, lights, camera, rigidbody and colliders are mapped)

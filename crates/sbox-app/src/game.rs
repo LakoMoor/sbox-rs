@@ -120,29 +120,21 @@ impl GraphAnimator {
 
 impl Component for GraphAnimator {
     fn on_update(&mut self, scene: &mut Scene, _h: Handle) {
-        let mut lens: std::collections::HashMap<String, f32> = Default::default();
-        let samples = {
+        let pose = {
             let mut inst = std::mem::replace(&mut self.instance, sbox_resource::animgraph::Instance::new(&self.graph));
             let graph = std::mem::take(&mut self.graph);
-            let mut len = |n: &str| -> f32 {
-                *lens.entry(n.to_string()).or_insert_with(|| self.clip(n).map_or(1.0, |a| a.duration))
-            };
-            let s = inst.evaluate(&graph, scene.delta, &mut len);
+            let this = std::cell::RefCell::new(&mut *self);
+            let mut sample = |n: &str, t: f32| this.borrow_mut().clip(n).map(|a| (a.sample(t), a.additive));
+            let mut len = |n: &str| this.borrow_mut().clip(n).map_or(1.0, |a| a.duration);
+            let pose = inst.evaluate_pose(&graph, scene.delta, &mut sbox_resource::animgraph::Clips { sample: &mut sample, len: &mut len });
+            drop(this);
             self.graph = graph;
             self.instance = inst;
-            s
+            pose
         };
-        let mut poses = Vec::new();
-        for s in &samples {
-            if let Some(a) = self.clip(&s.sequence) {
-                poses.push((a.sample(s.time), s.weight));
-            }
-        }
         let Some(skel) = self.anim_skel.as_ref() else { return };
-        if poses.is_empty() {
-            return;
-        }
-        let blended = sbox_resource::animgraph::blend_poses(&poses);
+        let Some(pose) = pose else { return };
+        let blended = pose.bones;
         let mats = self.skeleton.skin_matrices(skel, &blended);
         for &go in &self.parts {
             if let Some(m) = scene.component_mut::<sbox_scene::ModelRenderer>(go) {

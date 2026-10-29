@@ -46,6 +46,10 @@ pub enum Node {
     Blend2D { px: Option<i64>, py: Option<i64>, items: Vec<(String, [f32; 2])> },
     StateMachine { states: Vec<State> },
     Pass { child: Option<i64> },
+    /// Base pose with an additive (delta) pose applied on top.
+    Add { base: Option<i64>, additive: Option<i64> },
+    /// Generates an additive delta: `base - subtract`.
+    Subtract { base: Option<i64>, subtract: Option<i64> },
 }
 
 #[derive(Clone, Debug)]
@@ -163,7 +167,9 @@ fn parse_node(v: &Value) -> Option<Node> {
                 .collect(),
         },
         // Layering / modifier nodes: follow the base input.
-        "CRootAnimNode" | "CAddAnimNode" | "CSubtractAnimNode" | "CBoneMaskAnimNode" | "CLookAtAnimNode" | "CAimMatrixAnimNode"
+        "CAddAnimNode" => Node::Add { base: conn(v, "m_baseInput"), additive: conn(v, "m_additiveInput") },
+        "CSubtractAnimNode" => Node::Subtract { base: conn(v, "m_baseInputConnection"), subtract: conn(v, "m_subtractInputConnection") },
+        "CRootAnimNode" | "CBoneMaskAnimNode" | "CLookAtAnimNode" | "CAimMatrixAnimNode"
         | "CTwoBoneIKAnimNode" | "CSolveIKChainAnimNode" | "CSpeedScaleAnimNode" | "CHitReactAnimNode" | "CCycleControlAnimNode"
         | "CChoreoAnimNode" | "CDirectPlaybackAnimNode" => Node::Pass { child: PASS_KEYS.iter().find_map(|k| conn(v, k)) },
         _ => return None,
@@ -281,7 +287,7 @@ impl Instance {
         let Some(node) = g.nodes.get(&id) else { return };
         match node {
             Node::Sequence { name, speed, .. } => out.push(Sample { sequence: name.clone(), weight: w, time: t * speed }),
-            Node::Pass { child } => {
+            Node::Pass { child } | Node::Add { base: child, .. } | Node::Subtract { base: child, .. } => {
                 if let Some(c) = child {
                     self.eval(g, *c, w, t, dt, len, out, depth + 1);
                 }
@@ -382,6 +388,186 @@ impl Instance {
     }
 }
 
+/// A bone pose set; `additive` marks a delta produced by `Subtract` or an additive clip.
+#[derive(Clone, Debug)]
+pub struct Pose {
+    pub bones: Vec<BonePose>,
+    pub additive: bool,
+}
+
+/// Source of clip poses and durations for [`Instance::evaluate_pose`].
+pub struct Clips<'a> {
+    /// Pose of a sequence at a time in seconds, plus whether the clip is additive.
+    pub sample: &'a mut dyn FnMut(&str, f32) -> Option<(Vec<BonePose>, bool)>,
+    pub len: &'a mut dyn FnMut(&str) -> f32,
+}
+
+fn qmul(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
+    [
+        a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1],
+        a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
+        a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3],
+        a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2],
+    ]
+}
+
+fn qinv(q: [f32; 4]) -> [f32; 4] {
+    [-q[0], -q[1], -q[2], q[3]]
+}
+
+/// `base - sub` as a local-space delta: positions subtract, rotation is `inv(sub) * base`.
+pub fn subtract_poses(base: &[BonePose], sub: &[BonePose]) -> Vec<BonePose> {
+    base.iter()
+        .zip(sub)
+        .map(|(b, s)| BonePose {
+            position: std::array::from_fn(|i| b.position[i] - s.position[i]),
+            rotation: qmul(qinv(s.rotation), b.rotation),
+            scale: b.scale,
+        })
+        .collect()
+}
+
+/// Apply a delta on top of `base`: positions add, rotation is `base * delta` (both scaled by `weight`).
+pub fn apply_additive(base: &mut [BonePose], delta: &[BonePose], weight: f32) {
+    for (b, d) in base.iter_mut().zip(delta) {
+        for i in 0..3 {
+            b.position[i] += d.position[i] * weight;
+        }
+        let mut q = [d.rotation[0] * weight, d.rotation[1] * weight, d.rotation[2] * weight, 1.0 + (d.rotation[3] - 1.0) * weight];
+        let l = q.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-6);
+        q = q.map(|x| x / l);
+        b.rotation = qmul(b.rotation, q);
+    }
+}
+
+fn first_sequence(g: &Graph, id: i64, depth: u32) -> Option<String> {
+    if depth > 128 {
+        return None;
+    }
+    match g.nodes.get(&id)? {
+        Node::Sequence { name, .. } => Some(name.clone()),
+        Node::Pass { child } | Node::Add { base: child, .. } | Node::Subtract { base: child, .. } => first_sequence(g, (*child)?, depth + 1),
+        Node::First { children } | Node::Select { children, .. } => first_sequence(g, *children.first()?, depth + 1),
+        Node::Blend { children, .. } => first_sequence(g, children.first()?.0, depth + 1),
+        Node::Blend2D { items, .. } => items.first().map(|i| i.0.clone()),
+        Node::StateMachine { states } => first_sequence(g, states.iter().find(|s| s.start).or_else(|| states.first())?.input?, depth + 1),
+    }
+}
+
+impl Instance {
+    /// Advance by `dt` and return the final pose, computed node by node (so additive layers work).
+    pub fn evaluate_pose(&mut self, graph: &Graph, dt: f32, clips: &mut Clips) -> Option<Pose> {
+        self.time += dt;
+        let root = graph.root?;
+        self.pose(graph, root, self.time, dt, clips, 0)
+    }
+
+    fn pose(&mut self, g: &Graph, id: i64, t: f32, dt: f32, clips: &mut Clips, depth: u32) -> Option<Pose> {
+        if depth > 512 {
+            return None;
+        }
+        let node = g.nodes.get(&id)?;
+        let seq = |clips: &mut Clips, name: &str, time: f32| (clips.sample)(name, time).map(|(bones, additive)| Pose { bones, additive });
+        match node {
+            Node::Sequence { name, speed, .. } => seq(clips, name, t * speed),
+            Node::Pass { child } => self.pose(g, (*child)?, t, dt, clips, depth + 1),
+            Node::First { children } => self.pose(g, *children.first()?, t, dt, clips, depth + 1),
+            Node::Select { param, children } => {
+                let i = param.and_then(|p| self.params.get(&p).copied()).unwrap_or(0.0).max(0.0) as usize;
+                let c = *children.get(i.min(children.len().saturating_sub(1)))?;
+                self.pose(g, c, t, dt, clips, depth + 1)
+            }
+            Node::Add { base, additive } => {
+                let mut b = self.pose(g, (*base)?, t, dt, clips, depth + 1)?;
+                if let Some(a) = additive {
+                    if let Some(d) = self.pose(g, *a, t, dt, clips, depth + 1) {
+                        apply_additive(&mut b.bones, &d.bones, 1.0);
+                    }
+                }
+                Some(b)
+            }
+            Node::Subtract { base, subtract } => {
+                let b = self.pose(g, (*base)?, t, dt, clips, depth + 1)?;
+                let s = self.pose(g, (*subtract)?, t, dt, clips, depth + 1)?;
+                Some(Pose { bones: subtract_poses(&b.bones, &s.bones), additive: true })
+            }
+            Node::Blend2D { px, py, items } => {
+                let x = px.and_then(|p| self.params.get(&p).copied()).unwrap_or(0.0) as f32;
+                let y = py.and_then(|p| self.params.get(&p).copied()).unwrap_or(0.0) as f32;
+                let mut near: Vec<(f32, &String)> = items.iter().map(|(n, p)| ((p[0] - x).powi(2) + (p[1] - y).powi(2), n)).collect();
+                near.sort_by(|a, b| a.0.total_cmp(&b.0));
+                near.truncate(3);
+                if near.first().map_or(false, |f| f.0 < 1e-4) {
+                    near.truncate(1);
+                }
+                let mut parts = Vec::new();
+                for (d, name) in near {
+                    if let Some(p) = seq(clips, name, t) {
+                        parts.push((p.bones, 1.0 / (d + 1e-3)));
+                    }
+                }
+                (!parts.is_empty()).then(|| Pose { bones: blend_poses(&parts), additive: false })
+            }
+            Node::Blend { param, children } => {
+                let v = param.and_then(|p| self.params.get(&p).copied()).unwrap_or(0.0) as f32;
+                let mut sorted = children.clone();
+                sorted.sort_by(|a, b| a.1.total_cmp(&b.1));
+                match sorted.iter().position(|c| c.1 >= v) {
+                    None => self.pose(g, sorted.last()?.0, t, dt, clips, depth + 1),
+                    Some(0) => self.pose(g, sorted[0].0, t, dt, clips, depth + 1),
+                    Some(i) => {
+                        let (a, b) = (sorted[i - 1], sorted[i]);
+                        let f = ((v - a.1) / (b.1 - a.1).max(1e-6)).clamp(0.0, 1.0);
+                        let pa = self.pose(g, a.0, t, dt, clips, depth + 1);
+                        let pb = self.pose(g, b.0, t, dt, clips, depth + 1);
+                        match (pa, pb) {
+                            (Some(pa), Some(pb)) => Some(Pose { additive: pa.additive, bones: blend_poses(&[(pa.bones, 1.0 - f), (pb.bones, f)]) }),
+                            (p, None) | (None, p) => p,
+                        }
+                    }
+                }
+            }
+            Node::StateMachine { states } => {
+                let start = states.iter().find(|s| s.start).or_else(|| states.first())?;
+                let mut m = self.machines.remove(&id).unwrap_or(MachineState { state: start.id, ..Default::default() });
+                m.time += dt;
+                if let Some(p) = &mut m.prev {
+                    p.1 += dt;
+                    p.2 += dt;
+                    if p.2 >= p.3 {
+                        m.prev = None;
+                    }
+                }
+                if let Some(cur) = states.iter().find(|s| s.id == m.state) {
+                    let needs_finished = cur.transitions.iter().any(|tr| tr.conditions.iter().any(|c| matches!(c, Cond::Finished)));
+                    let finished = needs_finished && cur.input.and_then(|i| first_sequence(g, i, 0)).map_or(false, |n| m.time >= (clips.len)(&n));
+                    let next = cur.transitions.iter().find(|tr| tr.dest != cur.id && tr.conditions.iter().all(|c| self.cond_true(c, m.time, finished)));
+                    if let Some(tr) = next {
+                        if tr.blend > 0.0 {
+                            m.prev = Some((m.state, m.time, 0.0, tr.blend));
+                        }
+                        m.state = tr.dest;
+                        m.time = 0.0;
+                    }
+                }
+                let cur_w = m.prev.map_or(1.0, |p| (p.2 / p.3).clamp(0.0, 1.0));
+                let cur_input = states.iter().find(|s| s.id == m.state).and_then(|s| s.input);
+                let (prev, cur_time) = (m.prev, m.time);
+                self.machines.insert(id, m);
+                let cur = cur_input.and_then(|i| self.pose(g, i, cur_time, 0.0, clips, depth + 1));
+                let old = prev.and_then(|(ps, pt, _, _)| {
+                    let inp = states.iter().find(|s| s.id == ps)?.input?;
+                    self.pose(g, inp, pt, 0.0, clips, depth + 1)
+                });
+                match (cur, old) {
+                    (Some(c), Some(o)) => Some(Pose { additive: c.additive, bones: blend_poses(&[(c.bones, cur_w), (o.bones, 1.0 - cur_w)]) }),
+                    (p, None) | (None, p) => p,
+                }
+            }
+        }
+    }
+}
+
 /// Weighted blend of poses (positions lerp, rotations nlerp with sign alignment).
 pub fn blend_poses(poses: &[(Vec<BonePose>, f32)]) -> Vec<BonePose> {
     let Some((first, _)) = poses.first() else { return Vec::new() };
@@ -435,7 +621,7 @@ mod tests {
                 let Some(i) = id else { println!("chain ended (no child id)"); break };
                 let Some(n) = g.nodes.get(&i) else { println!("chain {i}: node missing/unparsed"); break };
                 let d = match n {
-                    Node::Pass { child } => format!("Pass {child:?}"),
+                    Node::Pass { child } | Node::Add { base: child, .. } | Node::Subtract { base: child, .. } => format!("Pass {child:?}"),
                     Node::First { children } | Node::Select { children, .. } => format!("First {children:?}"),
                     Node::Blend2D { items, .. } => format!("Blend2D {}", items.len()),
                     Node::Blend { children, .. } => format!("Blend {children:?}"),
@@ -444,7 +630,7 @@ mod tests {
                 };
                 println!("chain {i}: {d}");
                 id = match n {
-                    Node::Pass { child } => *child,
+                    Node::Pass { child } | Node::Add { base: child, .. } | Node::Subtract { base: child, .. } => *child,
                     Node::First { children } | Node::Select { children, .. } => children.first().copied(),
                     Node::Blend { children, .. } => children.first().map(|c| c.0),
                     Node::StateMachine { states } => states.iter().find(|s| s.start).and_then(|s| s.input),
@@ -456,6 +642,41 @@ mod tests {
         let sum: f32 = out.iter().map(|s| s.weight).sum();
         assert!((sum - 1.0).abs() < 1e-3, "weights sum to {sum}");
         println!("default pose: {out:?}");
+    }
+
+    #[test]
+    fn subtract_then_apply_reproduces_the_target() {
+        let s = std::f32::consts::FRAC_1_SQRT_2;
+        let reference = vec![BonePose { position: [1.0, 1.0, 0.0], rotation: [0.0, 0.0, s, s], scale: 1.0 }];
+        let target = vec![BonePose { position: [3.0, 0.0, 2.0], rotation: [s, 0.0, 0.0, s], scale: 1.0 }];
+        let delta = subtract_poses(&target, &reference);
+        let mut out = reference.clone();
+        apply_additive(&mut out, &delta, 1.0);
+        for i in 0..3 {
+            assert!((out[0].position[i] - target[0].position[i]).abs() < 1e-5);
+        }
+        let dot: f32 = (0..4).map(|i| out[0].rotation[i] * target[0].rotation[i]).sum();
+        assert!(dot.abs() > 0.9999, "rotation mismatch, dot {dot}");
+    }
+
+    #[test]
+    fn citizen_graph_produces_a_pose() {
+        let Ok(bytes) = std::fs::read(GRAPH) else { return };
+        let g = Graph::parse(&bytes).unwrap();
+        let mut inst = Instance::new(&g);
+        let id = vec![BonePose { position: [0.0; 3], rotation: [0.0, 0.0, 0.0, 1.0], scale: 1.0 }; 4];
+        let mut requested = Vec::new();
+        let mut sample = |n: &str, _t: f32| {
+            requested.push(n.to_string());
+            Some((id.clone(), n.ends_with("_delta")))
+        };
+        let mut len = |_: &str| 1.0;
+        let mut pose = None;
+        for _ in 0..10 {
+            pose = inst.evaluate_pose(&g, 1.0 / 30.0, &mut Clips { sample: &mut sample, len: &mut len });
+        }
+        assert!(pose.is_some(), "default parameters should produce a pose");
+        assert!(requested.iter().any(|n| n == "IdlePose_Default"), "{requested:?}");
     }
 
     #[test]
