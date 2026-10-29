@@ -21,6 +21,9 @@ struct Post {
     cam_right: vec4<f32>,
     cam_up: vec4<f32>,
     cam_fwd: vec4<f32>,
+    // fog volumes (world AABBs); cam_pos.w = count; vol_max.w = strength
+    vol_min: array<vec4<f32>, 4>,
+    vol_max: array<vec4<f32>, 4>,
 };
 
 @group(0) @binding(0) var hdr_tex: texture_2d<f32>;
@@ -150,6 +153,29 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
             let along = pow(clamp((dist - post.fog.x) / max(post.fog.y - post.fog.x, 1.0), 0.0, 1.0), post.fog.z);
             let below = pow(clamp(1.0 - (world.z - post.fog_base.x) / max(post.fog.w, 1.0), 0.0, 1.0), post.fog_color.a);
             c = mix(c, post.fog_color.rgb, along * below);
+        }
+    }
+    if (post.cam_pos.w > 0.5) {
+        let dims = vec2<f32>(textureDimensions(hdr_tex));
+        let px = vec2<i32>(in.pos.xy);
+        if (textureLoad(depth_tex, px, 0) < 0.99999) {
+            let v = view_pos(px, dims);
+            let target_pos = post.cam_pos.xyz + post.cam_right.xyz * v.x + post.cam_up.xyz * v.y + post.cam_fwd.xyz * v.z;
+            let ray = target_pos - post.cam_pos.xyz;
+            let total = length(ray);
+            let dir = ray / max(total, 0.0001);
+            var optical = 0.0;
+            for (var i = 0u; i < 4u; i = i + 1u) {
+                if (f32(i) >= post.cam_pos.w) { break; }
+                let inv = 1.0 / select(dir, vec3<f32>(1e-6), abs(dir) < vec3<f32>(1e-6));
+                let t0 = (post.vol_min[i].xyz - post.cam_pos.xyz) * inv;
+                let t1 = (post.vol_max[i].xyz - post.cam_pos.xyz) * inv;
+                let tmin = max(max(min(t0.x, t1.x), min(t0.y, t1.y)), max(min(t0.z, t1.z), 0.0));
+                let tmax = min(min(max(t0.x, t1.x), max(t0.y, t1.y)), min(max(t0.z, t1.z), total));
+                optical += max(tmax - tmin, 0.0) * post.vol_max[i].w;
+            }
+            // Density per world unit is a guess (no reference render to calibrate against).
+            c = mix(c, vec3<f32>(0.6, 0.65, 0.7), 1.0 - exp(-optical / 512.0));
         }
     }
     if (post.dof.x > 0.0) {

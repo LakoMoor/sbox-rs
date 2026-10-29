@@ -3,7 +3,7 @@ use anyhow::{anyhow, Result};
 use bytemuck::{Pod, Zeroable};
 use sbox_math::{sbox_to_view, Mat4, RotationExt, Transform, Vec3};
 use sbox_resource::vtex::{TexFormat, Texture};
-use sbox_scene::{GradientFog, AmbientOcclusion, ChromaticAberration, DepthOfField, Sharpen, TonemapMode, Tonemapping, Bloom, Vignette, CameraComponent, DirectionalLight, MaterialId, MeshId, ModelRenderer, PointLight, Scene, SpotLight};
+use sbox_scene::{FogVolume, GradientFog, AmbientOcclusion, ChromaticAberration, DepthOfField, Sharpen, TonemapMode, Tonemapping, Bloom, Vignette, CameraComponent, DirectionalLight, MaterialId, MeshId, ModelRenderer, PointLight, Scene, SpotLight};
 use wgpu::util::DeviceExt;
 
 const MAX_POINT_LIGHTS: usize = 8;
@@ -97,6 +97,8 @@ struct PostUniform {
     cam_right: [f32; 4],
     cam_up: [f32; 4],
     cam_fwd: [f32; 4],
+    vol_min: [[f32; 4]; 4],
+    vol_max: [[f32; 4]; 4],
 }
 
 /// A textured screen-space rectangle drawn over the finished frame (`rect` = x, y, width, height in pixels, origin top-left).
@@ -1195,6 +1197,15 @@ impl Renderer {
             let ca = scene.iter_components::<ChromaticAberration>().next().map_or([0.0; 2], |(_, c)| c.offset);
             let fog = scene.iter_components::<GradientFog>().next().map(|(go, f)| (scene.world_transform(go).position.z, f));
             let cam_rot = cam_xf.rotation;
+            let mut vol_min = [[0.0f32; 4]; 4];
+            let mut vol_max = [[0.0f32; 4]; 4];
+            let mut vol_count = 0;
+            for (go, v) in scene.iter_components::<FogVolume>().take(4) {
+                let p = scene.world_transform(go).position;
+                vol_min[vol_count] = [p.x + v.mins[0], p.y + v.mins[1], p.z + v.mins[2], 0.0];
+                vol_max[vol_count] = [p.x + v.maxs[0], p.y + v.maxs[1], p.z + v.maxs[2], v.strength];
+                vol_count += 1;
+            }
             let ao = scene.iter_components::<AmbientOcclusion>().next().map(|(_, a)| a);
             let dof = scene.iter_components::<DepthOfField>().next().map(|(_, d)| d);
             let sharpen = scene.iter_components::<Sharpen>().next().map_or(0.0, |(_, s)| s.scale);
@@ -1211,7 +1222,9 @@ impl Renderer {
                 fog: fog.map_or([0.0; 4], |(_, f)| [f.start_distance, f.end_distance, f.falloff_exponent, f.height]),
                 fog_color: fog.map_or([0.0; 4], |(_, f)| [f.color[0], f.color[1], f.color[2], f.vertical_falloff_exponent]),
                 fog_base: [fog.map_or(0.0, |(z, _)| z), 0.0, 0.0, 0.0],
-                cam_pos: [cam_xf.position.x, cam_xf.position.y, cam_xf.position.z, 0.0],
+                cam_pos: [cam_xf.position.x, cam_xf.position.y, cam_xf.position.z, vol_count as f32],
+                vol_min,
+                vol_max,
                 cam_right: (cam_rot * -Vec3::Y).extend(0.0).to_array(),
                 cam_up: (cam_rot * Vec3::Z).extend(0.0).to_array(),
                 cam_fwd: (cam_rot * Vec3::X).extend(0.0).to_array(),

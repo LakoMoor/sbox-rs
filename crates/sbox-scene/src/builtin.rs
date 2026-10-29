@@ -259,3 +259,15 @@ impl Default for GradientFog {
 impl Component for GradientFog {
     impl_component_any!();
 }
+
+/// Box-shaped participating medium (`env_volumetric_fog_volume`). `mins` / `maxs` are relative to the object's
+/// position; rotation and scale of the object are ignored.
+pub struct FogVolume {
+    pub mins: [f32; 3],
+    pub maxs: [f32; 3],
+    pub strength: f32,
+}
+
+impl Component for FogVolume {
+    impl_component_any!();
+}

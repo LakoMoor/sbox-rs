@@ -616,6 +616,18 @@ impl Assets {
                     self.load_sky(r, mat, [t[0] as f32 / 255.0, t[1] as f32 / 255.0, t[2] as f32 / 255.0, 1.0]);
                 }
             }
+            "env_volumetric_fog_volume" => {
+                let go = scene.create_object("fog_volume");
+                scene.set_local_transform(go, Transform::from_position(transform.position));
+                scene.add_component(
+                    go,
+                    sbox_scene::FogVolume {
+                        mins: e.vec3("box_mins").unwrap_or([-64.0; 3]),
+                        maxs: e.vec3("box_maxs").unwrap_or([64.0; 3]),
+                        strength: e.float("fogstrength").unwrap_or(1.0),
+                    },
+                );
+            }
             "info_player_start" => {
                 if info.player_start.is_none() {
                     info.player_start = Some((transform.position, yaw));
