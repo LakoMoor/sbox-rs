@@ -7,6 +7,7 @@ pub mod container;
 pub mod kv3;
 pub mod mesh;
 pub mod model;
+pub mod phys;
 pub mod vbib;
 pub mod vmat;
 pub mod sound_event;

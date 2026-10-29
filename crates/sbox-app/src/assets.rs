@@ -19,6 +19,26 @@ pub struct LoadedModel {
     pub maxs: Vec3,
 }
 
+impl LoadedModel {
+    /// Collision shape: the model's hulls / spheres / capsules, or its bounding box when it has no usable physics data.
+    pub fn collision_shape(&self) -> Shape {
+        use sbox_resource::phys::PhysShape;
+        let v = |a: &[f32; 3]| Vec3::from(*a);
+        match &self.model.physics {
+            Some(list) => Shape::Compound(
+                list.iter()
+                    .map(|s| match s {
+                        PhysShape::Hull(p) => Shape::Hull(p.iter().map(v).collect()),
+                        PhysShape::Sphere { center, radius } => Shape::Sphere { center: v(center), radius: *radius },
+                        PhysShape::Capsule { a, b, radius } => Shape::Capsule { a: v(a), b: v(b), radius: *radius },
+                    })
+                    .collect(),
+            ),
+            None => Shape::Box { center: (self.mins + self.maxs) * 0.5, size: self.maxs - self.mins },
+        }
+    }
+}
+
 pub struct Assets {
     pub fs: Option<vmat::GameFs>,
     models: HashMap<String, Option<Rc<LoadedModel>>>,
@@ -492,11 +512,10 @@ impl ComponentLoader for SceneLoader<'_> {
                 true
             }
             "ModelCollider" => {
-                // Approximation: the collision shape is the model's bounding box (the real one is a `vphys_c` hull set).
                 let Some(path) = p.get("Model").and_then(Value::as_str) else { return true };
                 let Some(m) = self.assets.load_model(self.r, path) else { return true };
                 let trig = p.get("IsTrigger").and_then(Value::as_bool).unwrap_or(false);
-                scene.add_component(go, Collider { shape: Shape::Box { center: (m.mins + m.maxs) * 0.5, size: m.maxs - m.mins }, is_trigger: trig });
+                scene.add_component(go, Collider { shape: m.collision_shape(), is_trigger: trig });
                 true
             }
             "PlaneCollider" => {
@@ -660,9 +679,8 @@ impl Assets {
                 let go = scene.create_object("prop");
                 scene.set_local_transform(go, transform);
                 self.spawn(scene, go, &m, [1.0; 4], None);
-                // Collision is the model's bounding box (see `ModelCollider`); only `prop_physics` moves.
-                let shape = Shape::Box { center: (m.mins + m.maxs) * 0.5, size: m.maxs - m.mins };
-                scene.add_component(go, Collider { shape, is_trigger: false });
+                // Only `prop_physics` moves.
+                scene.add_component(go, Collider { shape: m.collision_shape(), is_trigger: false });
                 if e.classname() == "prop_physics" && e.bool("motiondisabled") != Some(true) {
                     scene.add_component(go, Rigidbody::default());
                 }

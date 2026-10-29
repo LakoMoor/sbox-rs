@@ -104,6 +104,8 @@ pub struct Model {
     pub skeleton: Skeleton,
     pub meshes: Vec<ModelMesh>,
     pub default_group_mask: i64,
+    /// Collision shapes in model space (`None` when the model has none or only skeletal physics).
+    pub physics: Option<Vec<crate::phys::PhysShape>>,
 }
 
 impl Model {
@@ -174,5 +176,6 @@ pub fn load_with(file: &[u8], read: &dyn Fn(&str) -> Option<Vec<u8>>) -> Result<
             lod_mask: lod_masks.get(i).copied().unwrap_or(1),
         });
     }
+    model.physics = crate::phys::load(&res, &kv, read);
     Ok(model)
 }

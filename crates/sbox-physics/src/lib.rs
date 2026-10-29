@@ -68,13 +68,36 @@ impl Component for PlayerController {
     impl_component_any!();
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub enum Shape {
     /// Full extents in object-local units.
     Box { center: Vec3, size: Vec3 },
     Sphere { center: Vec3, radius: f32 },
     /// Infinite plane through the object origin, normal = object +Z.
     Plane,
+    /// Convex hull of points in object-local units.
+    Hull(Vec<Vec3>),
+    /// Capsule between two object-local points.
+    Capsule { a: Vec3, b: Vec3, radius: f32 },
+    /// Several shapes acting as one collider (model collision data).
+    Compound(Vec<Shape>),
+}
+
+impl Shape {
+    /// Rapier shape and its local offset for a non-plane, non-compound shape at the given object scale.
+    fn part(&self, scale: Vec3) -> Option<(Vec3, SharedShape)> {
+        let p = |v: &Vec3| point![v.x * scale.x, v.y * scale.y, v.z * scale.z];
+        Some(match self {
+            Shape::Box { center, size } => {
+                let h = *size * scale.abs() * 0.5;
+                (*center * scale, SharedShape::cuboid(h.x.max(0.01), h.y.max(0.01), h.z.max(0.01)))
+            }
+            Shape::Sphere { center, radius } => (*center * scale, SharedShape::ball(radius * scale.abs().max_element())),
+            Shape::Hull(points) => (Vec3::ZERO, SharedShape::convex_hull(&points.iter().map(p).collect::<Vec<_>>())?),
+            Shape::Capsule { a, b, radius } => (Vec3::ZERO, SharedShape::capsule(p(a), p(b), radius * scale.abs().max_element())),
+            Shape::Plane | Shape::Compound(_) => return None,
+        })
+    }
 }
 
 /// `BoxCollider` / `SphereCollider` / `PlaneCollider`.
@@ -191,15 +214,23 @@ impl Physics {
                 continue;
             }
             let Some(c) = scene.component::<Collider>(go) else { continue };
-            let (shape, extra) = match c.shape {
-                Shape::Box { center, size } => {
-                    let h = size * world.scale.abs() * 0.5;
-                    (ColliderBuilder::cuboid(h.x.max(0.01), h.y.max(0.01), h.z.max(0.01)), center * world.scale)
-                }
-                Shape::Sphere { center, radius } => {
-                    (ColliderBuilder::ball(radius * world.scale.abs().max_element()), center * world.scale)
-                }
+            let (shape, extra) = match &c.shape {
                 Shape::Plane => (ColliderBuilder::halfspace(Vector3::z_axis()), Vec3::ZERO),
+                Shape::Compound(list) => {
+                    let parts: Vec<_> = list
+                        .iter()
+                        .filter_map(|s| s.part(world.scale))
+                        .map(|(o, sh)| (Isometry3::translation(o.x, o.y, o.z), sh))
+                        .collect();
+                    if parts.is_empty() {
+                        continue;
+                    }
+                    (ColliderBuilder::compound(parts), Vec3::ZERO)
+                }
+                single => {
+                    let Some((offset, sh)) = single.part(world.scale) else { continue };
+                    (ColliderBuilder::new(sh), offset)
+                }
             };
             let builder = shape.sensor(c.is_trigger);
             match Self::rigidbody_owner(scene, go).and_then(|o| self.body_of.get(&o).map(|h| (o, *h))) {
@@ -300,6 +331,26 @@ impl Physics {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compound_hull_and_capsule_rest_on_plane() {
+        let mut scene = Scene::new();
+        Physics::install(&mut scene);
+        let ground = scene.create_object("ground");
+        scene.add_component(ground, Collider { shape: Shape::Plane, is_trigger: false });
+        // A 40-unit cube hull (z 0..40) plus a capsule standing on top of it (z 40..80 plus caps).
+        let h = |x: f32, y: f32, z: f32| Vec3::new(x, y, z);
+        let cube: Vec<Vec3> = (0..8).map(|i| h(if i & 1 == 0 { -20.0 } else { 20.0 }, if i & 2 == 0 { -20.0 } else { 20.0 }, if i & 4 == 0 { 0.0 } else { 40.0 })).collect();
+        let b = scene.create_object("prop");
+        scene.set_local_transform(b, Transform::from_position(Vec3::new(0.0, 0.0, 100.0)));
+        scene.add_component(b, Rigidbody::default());
+        scene.add_component(b, Collider { shape: Shape::Compound(vec![Shape::Hull(cube), Shape::Capsule { a: h(0.0, 0.0, 50.0), b: h(0.0, 0.0, 70.0), radius: 5.0 }]), is_trigger: false });
+        for _ in 0..400 {
+            scene.tick(1.0 / 50.0);
+        }
+        let z = scene.world_transform(b).position.z;
+        assert!(z.abs() < 1.5, "the hull's bottom (object z=0) should rest on the plane, got {z}");
+    }
 
     #[test]
     fn box_falls_and_rests_on_plane() {
