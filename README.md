@@ -115,6 +115,6 @@ Open, in rough order of value:
 5. Networking (needs a design decision)
 6. Scripting story for game code: a Rust API or an embedded .NET runtime (needs a design decision)
 
-## ## License
+## License
 
 MIT. s&box and Source 2 belong to their respective owners.
