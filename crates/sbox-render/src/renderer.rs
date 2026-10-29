@@ -63,17 +63,20 @@ pub struct MaterialDesc {
     pub unlit: bool,
     /// Alpha-blended, drawn after opaque geometry without writing depth.
     pub translucent: bool,
+    /// With `translucent`: add the colour to the framebuffer instead of alpha blending.
+    pub additive: bool,
 }
 
 impl Default for MaterialDesc {
     fn default() -> Self {
-        Self { color: None, normal: None, rma: None, tint: [1.0; 4], uv_scale: [1.0; 2], roughness: 0.7, metalness: 0.0, bump: 1.0, unlit: false, translucent: false }
+        Self { color: None, normal: None, rma: None, tint: [1.0; 4], uv_scale: [1.0; 2], roughness: 0.7, metalness: 0.0, bump: 1.0, unlit: false, translucent: false, additive: false }
     }
 }
 
 struct GpuMaterial {
     bind_group: wgpu::BindGroup,
     translucent: bool,
+    additive: bool,
 }
 
 /// Opaque handle to a GPU texture.
@@ -110,6 +113,7 @@ pub struct Renderer {
     config: wgpu::SurfaceConfiguration,
     pipeline: wgpu::RenderPipeline,
     pipeline_alpha: wgpu::RenderPipeline,
+    pipeline_add: wgpu::RenderPipeline,
     globals_buf: wgpu::Buffer,
     globals_bg: wgpu::BindGroup,
     bones_buf: wgpu::Buffer,
@@ -340,7 +344,7 @@ impl Renderer {
             bind_group_layouts: &[&globals_layout, &object_layout, &material_layout],
             push_constant_ranges: &[],
         });
-        let make_pipeline = |alpha: bool| device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let make_pipeline = |alpha: bool, additive: bool| device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some(if alpha { "scene alpha" } else { "scene" }),
             layout: Some(&pl),
             vertex: wgpu::VertexState {
@@ -359,7 +363,16 @@ impl Renderer {
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: config.format,
-                    blend: Some(if alpha { wgpu::BlendState::ALPHA_BLENDING } else { wgpu::BlendState::REPLACE }),
+                    blend: Some(if additive {
+                        wgpu::BlendState {
+                            color: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::SrcAlpha, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add },
+                            alpha: wgpu::BlendComponent::OVER,
+                        }
+                    } else if alpha {
+                        wgpu::BlendState::ALPHA_BLENDING
+                    } else {
+                        wgpu::BlendState::REPLACE
+                    }),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
@@ -380,8 +393,9 @@ impl Renderer {
             multiview: None,
             cache: None,
         });;
-        let pipeline = make_pipeline(false);
-        let pipeline_alpha = make_pipeline(true);
+        let pipeline = make_pipeline(false, false);
+        let pipeline_alpha = make_pipeline(true, false);
+        let pipeline_add = make_pipeline(true, true);
 
         let shadow_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("shadow"),
@@ -423,6 +437,7 @@ impl Renderer {
             config,
             pipeline,
             pipeline_alpha,
+            pipeline_add,
             globals_buf,
             globals_bg,
             bones_buf,
@@ -662,7 +677,7 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(rma) },
             ],
         });
-        self.materials.push(GpuMaterial { bind_group, translucent: d.translucent });
+        self.materials.push(GpuMaterial { bind_group, translucent: d.translucent, additive: d.additive });
         MaterialId(self.materials.len() as u32 - 1)
     }
 
@@ -965,13 +980,17 @@ impl Renderer {
             }
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.globals_bg, &[]);
-            for translucent in [false, true] {
-                if translucent {
-                    pass.set_pipeline(&self.pipeline_alpha);
+            for mode in 0..3 {
+                match mode {
+                    1 => pass.set_pipeline(&self.pipeline_alpha),
+                    2 => pass.set_pipeline(&self.pipeline_add),
+                    _ => {}
                 }
                 for (i, (mesh, mat, _)) in draws.iter().enumerate() {
                     let mi = if (mat.0 as usize) < self.materials.len() { mat.0 as usize } else { 0 };
-                    if self.materials[mi].translucent != translucent {
+                    let g = &self.materials[mi];
+                    let m_mode = if !g.translucent { 0 } else if g.additive { 2 } else { 1 };
+                    if m_mode != mode {
                         continue;
                     }
                     let m = &self.meshes[mesh.0 as usize];

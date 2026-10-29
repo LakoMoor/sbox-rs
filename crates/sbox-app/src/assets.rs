@@ -78,6 +78,7 @@ impl Assets {
             bump: m.float("g_flBumpStrength", 1.0),
             unlit: false,
             translucent: false,
+            additive: false,
         })
     }
 
@@ -235,6 +236,29 @@ impl ComponentLoader for SceneLoader<'_> {
                 if p.get("PlayOnStart").and_then(Value::as_bool).unwrap_or(true) {
                     scene.add_component(go, crate::game::SoundPoint::new(ev, file, looping, vol));
                 }
+                true
+            }
+            "ParticleEffect" => {
+                scene.add_component(go, crate::particles::ParticleEffect::from_json(p));
+                true
+            }
+            "ParticleSphereEmitter" | "ParticleConeEmitter" => {
+                scene.add_component(go, crate::particles::ParticleEmitter::from_json(p, strip_ns(type_name) == "ParticleConeEmitter"));
+                true
+            }
+            "ParticleSpriteRenderer" => {
+                let tex_path = p
+                    .pointer("/Sprite/data/Animations/0/Frames/0/Texture")
+                    .and_then(Value::as_str)
+                    .map(|t| t.trim_end_matches("_c").to_string());
+                let tex = tex_path
+                    .as_deref()
+                    .and_then(|t| self.assets.fs.as_ref().and_then(|fs| fs.read(t)))
+                    .and_then(|d| sbox_resource::vtex::parse(&d).map_err(|e| log::warn!("sprite texture: {e:#}")).ok())
+                    .and_then(|t| self.r.upload_texture(&t));
+                let additive = p.get("Additive").and_then(Value::as_bool).unwrap_or(false);
+                let scale = p.get("Scale").and_then(Value::as_f64).unwrap_or(1.0) as f32;
+                scene.add_component(go, crate::particles::ParticleSpriteRenderer::new(self.r, tex, scale, additive));
                 true
             }
             "TemporaryEffect" => {

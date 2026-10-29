@@ -1,6 +1,7 @@
 mod assets;
 mod audio;
 mod game;
+mod particles;
 mod text;
 
 use std::sync::Arc;
