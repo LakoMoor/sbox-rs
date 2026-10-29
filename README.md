@@ -19,7 +19,8 @@ Conventions follow s&box: X forward, Y left, Z up; angles are pitch/yaw/roll in 
 | Crate | Mirrors | What it does |
 |---|---|---|
 | `sbox-math` | `Sandbox.System/Math` | Vec/Quat (glam), `Angles`, `Transform`, `BBox`, `Ray`, `Plane` |
-| `sbox-scene` | `Sandbox.Engine/Scene` | `Scene` / `GameObject` / `Component`, s&box lifecycle order, hierarchy, deferred destroy, fixed update |
+| `sbox-scene` | `Sandbox.Engine/Scene` | `Scene` / `GameObject` / `Component`, s&box lifecycle order, hierarchy, deferred destroy, fixed update, systems/resources, `.scene`/`.prefab` JSON loading |
+| `sbox-physics` | Havok wrapper in the closed core | rapier-based `Rigidbody`, box/sphere/plane colliders, parent-body compound colliders, fixed-step system |
 | `sbox-resource` | closed Source 2 native core | `*_c` container, binary KV3, `vtex_c` textures (BC1-7, LZ4/ZSTD mips, PNG), VBIB vertex/index buffers (meshopt), `vmdl_c` models (multi-mesh, skeleton, skin weights), `vmat_c` materials, `anim_c` animations, `skel_c`, virtual file resolver |
 | `sbox-render` | closed Source 2 native core | wgpu renderer: meshes, GPU skinning, materials with BC textures, directional + point lights, depth, off-screen rendering |
 | `sbox-app` | `Launcher` | demo window / model viewer / screenshot tool |
@@ -38,8 +39,8 @@ Checked on the `game/` directory produced by the official `Setup` step:
 
 - Animation blending / state graphs (`vanmgrph`), root motion, additive clips, in-model (`ANIM` block) animations
 - External `vmesh_c` references, `.shader_c` shaders, PBR / normal maps / shadows
-- VPK, audio (`vsnd_c`), physics, input, networking, UI
-- Scene / prefab serialization
+- VPK, audio (`vsnd_c`), input system, networking, UI
+- Prefab instances/variables, most scene component types (only models, lights, camera, rigidbody and colliders are mapped)
 - Scripting: s&box game code is C#; it needs either a Rust API or an embedded .NET runtime
 
 ## Build and run
@@ -61,6 +62,14 @@ Controls: WASD / QE to move, arrow keys to look, Esc to quit.
 cargo run -p sbox-app --release -- path/to/game/core/models/dev/gordon_at_desk.vmdl_c
 cargo run -p sbox-app --release -- path/to/game/addons/citizen/Assets/models/citizen/citizen.vmdl_c --anim path/to/game/addons/citizen/Assets/clips/avatarmenu_entry_walkin_01.anim_c
 ```
+
+### Loading a scene
+
+```
+cargo run -p sbox-app --release -- --scene path/to/game/samples/sweeper/Assets/scenes/minimal.scene_c
+```
+
+Loads the JSON scene, spawns models/lights/camera and runs the rapier simulation.
 
 ### Screenshots without a window
 
@@ -84,7 +93,7 @@ cargo run --release -p sbox-resource --example survey -- path/to/game
 2. `vmesh_c` references, shaders, normal maps / PBR, shadows
 3. VPK and a proper virtual file system
 4. Scene / prefab loading (`*.scene`, `*.prefab`)
-5. Physics (rapier), audio, input, networking, UI
+5. Input + character controller, audio, networking, UI
 6. Scripting story for game code
 
 ## License

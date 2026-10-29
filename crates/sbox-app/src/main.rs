@@ -1,7 +1,10 @@
+mod assets;
+
 use std::sync::Arc;
 use std::time::Instant;
 
 use sbox_math::{Angles, Quat, RotationExt, Transform, Vec3};
+use assets::{Assets, SceneLoader};
 use sbox_render::{MeshData, Renderer};
 use sbox_scene::{impl_component_any, CameraComponent, Component, DirectionalLight, Handle, ModelRenderer, PointLight, Scene};
 use winit::application::ApplicationHandler;
@@ -55,6 +58,10 @@ struct FlyCamera {
 }
 
 impl Component for FlyCamera {
+    fn on_start(&mut self, scene: &mut Scene, h: Handle) {
+        self.angles = scene.world_transform(h.go).rotation.angles();
+        self.angles.roll = 0.0;
+    }
     fn on_update(&mut self, scene: &mut Scene, h: Handle) {
         let k = self.keys;
         let b = |i: usize| k[i] as i32 as f32;
@@ -80,7 +87,10 @@ struct App {
 }
 
 impl App {
-    fn build_scene(scene: &mut Scene, r: &mut Renderer, model: Option<&str>, anim: Option<&str>) -> sbox_scene::GoId {
+    fn build_scene(scene: &mut Scene, r: &mut Renderer, model: Option<&str>, anim: Option<&str>, scene_file: Option<&str>) -> sbox_scene::GoId {
+        if let Some(path) = scene_file {
+            return Self::build_file_scene(scene, r, path);
+        }
         if let Some(path) = model {
             return Self::build_model_scene(scene, r, path, anim);
         }
@@ -119,6 +129,34 @@ impl App {
 }
 
 impl App {
+    /// Load a `.scene_c` (JSON) file into the scene.
+    fn build_file_scene(scene: &mut Scene, r: &mut Renderer, path: &str) -> sbox_scene::GoId {
+        use sbox_resource::{vmat, Resource};
+        let bytes = std::fs::read(path).expect("read scene");
+        let res = Resource::parse(&bytes).expect("scene container");
+        let json = std::str::from_utf8(res.block_data("DATA").expect("scene DATA")).expect("scene utf8");
+        let game_dir = std::path::Path::new(path).ancestors().find(|p| p.file_name().map_or(false, |n| n == "game"));
+        let mut assets = Assets::new(game_dir.map(vmat::GameFs::from_game_dir));
+        sbox_physics::Physics::install(scene);
+        let mut loader = SceneLoader { r, assets: &mut assets, camera: None };
+        let (roots, stats) = sbox_scene::load_scene_json(scene, json, &mut loader).expect("load scene");
+        let camera = loader.camera;
+        log::info!("scene: {} roots, {} objects, {} components", roots.len(), stats.objects, stats.components);
+        if !stats.unknown_components.is_empty() {
+            let mut v: Vec<_> = stats.unknown_components.iter().collect();
+            v.sort_by(|a, b| b.1.cmp(a.1));
+            log::info!("unsupported components: {:?}", &v[..v.len().min(12)]);
+        }
+        let cam = camera.unwrap_or_else(|| {
+            let c = scene.create_object("camera");
+            scene.set_local_transform(c, Transform::from_position(Vec3::new(-400.0, 0.0, 200.0)));
+            scene.add_component(c, CameraComponent::default());
+            c
+        });
+        scene.add_component(cam, FlyCamera::default());
+        cam
+    }
+
     /// Show a single compiled model (`.vmdl_c`) with a camera framed on its bounds.
     fn build_model_scene(scene: &mut Scene, r: &mut Renderer, path: &str, anim_path: Option<&str>) -> sbox_scene::GoId {
         use sbox_resource::{anim, model, vmat, vtex};
@@ -127,52 +165,18 @@ impl App {
         let meshes: Vec<_> = md.default_meshes().collect();
         log::info!("{path}: {} meshes ({} shown), {} bones", md.meshes.len(), meshes.len(), md.skeleton.len());
 
-        // game directory = nearest ancestor named "game"
         let game_dir = std::path::Path::new(path).ancestors().find(|p| p.file_name().map_or(false, |n| n == "game"));
         let fs = game_dir.map(vmat::GameFs::from_game_dir);
-
-        let (mut mins, mut maxs) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
-        for m in &meshes {
-            mins = mins.min(Vec3::from(m.mesh.mins));
-            maxs = maxs.max(Vec3::from(m.mesh.maxs));
-        }
-        let center = (mins + maxs) * 0.5;
-        let radius = ((maxs - mins).length() * 0.5).max(1.0);
+        let mut assets = Assets::new(fs);
+        let loaded = assets.load_model_bytes(r, path, &bytes).expect("model has no drawable meshes");
+        let _ = &md;
+        let center = (loaded.mins + loaded.maxs) * 0.5;
+        let radius = ((loaded.maxs - loaded.mins).length() * 0.5).max(1.0);
 
         let root = scene.create_object("model");
         scene.set_local_transform(root, Transform::from_position(-center));
-        let mut cache: std::collections::HashMap<String, sbox_scene::MaterialId> = Default::default();
-        let mut parts = Vec::new();
-        for (mi, mm) in meshes.iter().enumerate() {
-            for (i, dc) in mm.mesh.draw_calls.iter().enumerate() {
-                let mesh = r.upload_mesh(&MeshData::from_draw_call(dc));
-                let mat = *cache.entry(dc.material.clone()).or_insert_with(|| {
-                    let Some(fs) = &fs else { return sbox_scene::MaterialId(0) };
-                    let Some(data) = fs.read(&dc.material) else {
-                        log::warn!("material not found: {}", dc.material);
-                        return sbox_scene::MaterialId(0);
-                    };
-                    let m = match vmat::parse(&data) {
-                        Ok(m) => m,
-                        Err(e) => {
-                            log::warn!("material {}: {e:#}", dc.material);
-                            return sbox_scene::MaterialId(0);
-                        }
-                    };
-                    let tex = m
-                        .color_texture()
-                        .and_then(|t| fs.read(t))
-                        .and_then(|d| vtex::parse(&d).map_err(|e| log::warn!("texture: {e:#}")).ok())
-                        .and_then(|t| r.upload_texture(&t));
-                    r.create_material(tex, m.color_tint(), m.uv_scale())
-                });
-                let go = scene.create_object_in(Some(root), &format!("mesh{mi}_dc{i}"));
-                let mut m = ModelRenderer::new(mesh);
-                m.material = mat;
-                scene.add_component(go, m);
-                parts.push(go);
-            }
-        }
+        let parts = assets.spawn(scene, root, &loaded, [1.0; 4], None);
+        let fs = assets.fs.take();
 
         if let Some(ap) = anim_path {
             let a = anim::parse(&std::fs::read(ap).expect("read anim")).expect("parse anim");
@@ -212,8 +216,8 @@ impl ApplicationHandler for App {
         let size = window.inner_size();
         let mut renderer = Renderer::new(window.clone(), (size.width, size.height)).expect("renderer");
         let args: Vec<String> = std::env::args().skip(1).collect();
-        let model = args.iter().find(|a| !a.starts_with("--") && a.ends_with("_c")).cloned();
-        self.camera = Some(Self::build_scene(&mut self.scene, &mut renderer, model.as_deref(), args.iter().position(|a| a == "--anim").and_then(|i| args.get(i + 1)).map(String::as_str)));
+        let model = args.iter().find(|a| !a.starts_with("--") && a.ends_with(".vmdl_c")).cloned();
+        self.camera = Some(Self::build_scene(&mut self.scene, &mut renderer, model.as_deref(), args.iter().position(|a| a == "--anim").and_then(|i| args.get(i + 1)).map(String::as_str), args.iter().position(|a| a == "--scene").and_then(|i| args.get(i + 1)).map(String::as_str)));
         if let Some(i) = args.iter().position(|a| a == "--screenshot") {
             let out = args.get(i + 1).expect("--screenshot <file.png>");
             let secs: f32 = args.iter().position(|a| a == "--time").and_then(|j| args.get(j + 1)).and_then(|v| v.parse().ok()).unwrap_or(1.0);

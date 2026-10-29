@@ -1,0 +1,10 @@
+[package]
+name = "sbox-physics"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+sbox-math.workspace = true
+sbox-scene.workspace = true
+rapier3d = "0.22"
+log.workspace = true

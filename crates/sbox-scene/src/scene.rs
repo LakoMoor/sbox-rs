@@ -1,6 +1,7 @@
 use sbox_math::Transform;
 use slotmap::{new_key_type, SlotMap};
-use std::any::Any;
+use std::any::{Any, TypeId};
+use std::collections::HashMap;
 use std::collections::HashSet;
 
 new_key_type! {
@@ -92,8 +93,13 @@ struct Slot {
     comp: Option<Box<dyn Component>>,
 }
 
+/// A system runs once per fixed step (after component `on_fixed_update`), like `GameObjectSystem`.
+pub type System = Box<dyn FnMut(&mut Scene)>;
+
 #[derive(Default)]
 pub struct Scene {
+    resources: HashMap<TypeId, Box<dyn Any>>,
+    fixed_systems: Vec<System>,
     pub name: String,
     gos: SlotMap<GoId, GameObject>,
     comps: SlotMap<CompId, Slot>,
@@ -112,6 +118,29 @@ pub struct Scene {
 impl Scene {
     pub fn new() -> Self {
         Self { name: "scene".into(), fixed_rate: 50.0, fixed_delta: 1.0 / 50.0, max_fixed_steps: 5, ..Default::default() }
+    }
+
+    // -------------------------------------------------------------- resources
+
+    /// Store a singleton (physics world, input state, ...) in the scene.
+    pub fn insert_resource<T: Any>(&mut self, v: T) {
+        self.resources.insert(TypeId::of::<T>(), Box::new(v));
+    }
+    pub fn resource<T: Any>(&self) -> Option<&T> {
+        self.resources.get(&TypeId::of::<T>()).and_then(|b| b.downcast_ref())
+    }
+    pub fn resource_mut<T: Any>(&mut self) -> Option<&mut T> {
+        self.resources.get_mut(&TypeId::of::<T>()).and_then(|b| b.downcast_mut())
+    }
+    /// Run `f` with the resource temporarily removed so it can also receive `&mut Scene`.
+    pub fn with_resource<T: Any, R>(&mut self, f: impl FnOnce(&mut T, &mut Scene) -> R) -> Option<R> {
+        let mut b = self.resources.remove(&TypeId::of::<T>())?;
+        let r = f(b.downcast_mut::<T>()?, self);
+        self.resources.insert(TypeId::of::<T>(), b);
+        Some(r)
+    }
+    pub fn add_fixed_system(&mut self, sys: impl FnMut(&mut Scene) + 'static) {
+        self.fixed_systems.push(Box::new(sys));
     }
 
     // ---------------------------------------------------------------- objects
@@ -426,6 +455,13 @@ impl Scene {
             self.fixed_accum -= step;
             n += 1;
             self.for_each_running(|c, s, h| c.on_fixed_update(s, h));
+            let mut systems = std::mem::take(&mut self.fixed_systems);
+            for sys in &mut systems {
+                sys(self);
+            }
+            // systems added during the step are kept after the existing ones
+            systems.append(&mut self.fixed_systems);
+            self.fixed_systems = systems;
         }
         if n == self.max_fixed_steps {
             self.fixed_accum = 0.0;

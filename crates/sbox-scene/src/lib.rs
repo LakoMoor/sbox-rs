@@ -7,6 +7,8 @@
 
 mod builtin;
 mod scene;
+mod serialize;
 
 pub use builtin::*;
 pub use scene::*;
+pub use serialize::*;
