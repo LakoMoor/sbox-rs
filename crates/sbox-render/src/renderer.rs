@@ -59,16 +59,21 @@ pub struct MaterialDesc {
     pub roughness: f32,
     pub metalness: f32,
     pub bump: f32,
+    /// Ignore lighting and output the albedo directly.
+    pub unlit: bool,
+    /// Alpha-blended, drawn after opaque geometry without writing depth.
+    pub translucent: bool,
 }
 
 impl Default for MaterialDesc {
     fn default() -> Self {
-        Self { color: None, normal: None, rma: None, tint: [1.0; 4], uv_scale: [1.0; 2], roughness: 0.7, metalness: 0.0, bump: 1.0 }
+        Self { color: None, normal: None, rma: None, tint: [1.0; 4], uv_scale: [1.0; 2], roughness: 0.7, metalness: 0.0, bump: 1.0, unlit: false, translucent: false }
     }
 }
 
 struct GpuMaterial {
     bind_group: wgpu::BindGroup,
+    translucent: bool,
 }
 
 /// Opaque handle to a GPU texture.
@@ -104,6 +109,7 @@ pub struct Renderer {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     pipeline: wgpu::RenderPipeline,
+    pipeline_alpha: wgpu::RenderPipeline,
     globals_buf: wgpu::Buffer,
     globals_bg: wgpu::BindGroup,
     bones_buf: wgpu::Buffer,
@@ -334,8 +340,8 @@ impl Renderer {
             bind_group_layouts: &[&globals_layout, &object_layout, &material_layout],
             push_constant_ranges: &[],
         });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("scene"),
+        let make_pipeline = |alpha: bool| device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(if alpha { "scene alpha" } else { "scene" }),
             layout: Some(&pl),
             vertex: wgpu::VertexState {
                 module: &shader,
@@ -353,19 +359,19 @@ impl Renderer {
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: config.format,
-                    blend: Some(wgpu::BlendState::REPLACE),
+                    blend: Some(if alpha { wgpu::BlendState::ALPHA_BLENDING } else { wgpu::BlendState::REPLACE }),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back),
+                cull_mode: if alpha { None } else { Some(wgpu::Face::Back) },
                 ..Default::default()
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: DEPTH_FORMAT,
-                depth_write_enabled: true,
+                depth_write_enabled: !alpha,
                 depth_compare: wgpu::CompareFunction::Less,
                 stencil: Default::default(),
                 bias: Default::default(),
@@ -373,7 +379,9 @@ impl Renderer {
             multisample: Default::default(),
             multiview: None,
             cache: None,
-        });
+        });;
+        let pipeline = make_pipeline(false);
+        let pipeline_alpha = make_pipeline(true);
 
         let shadow_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("shadow"),
@@ -414,6 +422,7 @@ impl Renderer {
             queue,
             config,
             pipeline,
+            pipeline_alpha,
             globals_buf,
             globals_bg,
             bones_buf,
@@ -442,7 +451,8 @@ impl Renderer {
         Ok(this)
     }
 
-    fn upload_rgba8(&mut self, rgba: &[u8], w: u32, h: u32, srgb: bool) -> TextureId {
+    /// Upload raw RGBA8 pixels as a texture (`srgb` selects the colour interpretation).
+    pub fn upload_rgba8(&mut self, rgba: &[u8], w: u32, h: u32, srgb: bool) -> TextureId {
         let tex = self.device.create_texture_with_data(
             &self.queue,
             &wgpu::TextureDescriptor {
@@ -631,7 +641,7 @@ impl Renderer {
         let color = &self.textures[d.color.map_or(0, |t| t.0 as usize)];
         let normal = &self.textures[d.normal.unwrap_or(self.flat_normal).0 as usize];
         let rma = &self.textures[d.rma.map_or(0, |t| t.0 as usize)];
-        let flags = d.normal.is_some() as u32 as f32 + 2.0 * d.rma.is_some() as u32 as f32;
+        let flags = d.normal.is_some() as u32 as f32 + 2.0 * d.rma.is_some() as u32 as f32 + 4.0 * d.unlit as u32 as f32;
         let ub = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("material"),
             contents: bytemuck::bytes_of(&MaterialUniform {
@@ -652,7 +662,7 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(rma) },
             ],
         });
-        self.materials.push(GpuMaterial { bind_group });
+        self.materials.push(GpuMaterial { bind_group, translucent: d.translucent });
         MaterialId(self.materials.len() as u32 - 1)
     }
 
@@ -955,14 +965,22 @@ impl Renderer {
             }
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.globals_bg, &[]);
-            for (i, (mesh, mat, _)) in draws.iter().enumerate() {
-                let m = &self.meshes[mesh.0 as usize];
-                pass.set_bind_group(1, &self.object_bg, &[(i * stride) as u32]);
-                let mi = if (mat.0 as usize) < self.materials.len() { mat.0 as usize } else { 0 };
-                pass.set_bind_group(2, &self.materials[mi].bind_group, &[]);
-                pass.set_vertex_buffer(0, m.vb.slice(..));
-                pass.set_index_buffer(m.ib.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..m.index_count, 0, 0..1);
+            for translucent in [false, true] {
+                if translucent {
+                    pass.set_pipeline(&self.pipeline_alpha);
+                }
+                for (i, (mesh, mat, _)) in draws.iter().enumerate() {
+                    let mi = if (mat.0 as usize) < self.materials.len() { mat.0 as usize } else { 0 };
+                    if self.materials[mi].translucent != translucent {
+                        continue;
+                    }
+                    let m = &self.meshes[mesh.0 as usize];
+                    pass.set_bind_group(1, &self.object_bg, &[(i * stride) as u32]);
+                    pass.set_bind_group(2, &self.materials[mi].bind_group, &[]);
+                    pass.set_vertex_buffer(0, m.vb.slice(..));
+                    pass.set_index_buffer(m.ib.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..m.index_count, 0, 0..1);
+                }
             }
         }
         self.queue.submit(Some(enc.finish()));

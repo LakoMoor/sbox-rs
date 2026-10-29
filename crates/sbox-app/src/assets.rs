@@ -76,6 +76,8 @@ impl Assets {
             roughness: if rma.is_some() { m.float("g_flRoughnessScaleFactor", 1.0) } else { 0.7 },
             metalness: m.float("g_flMetalness", 0.0),
             bump: m.float("g_flBumpStrength", 1.0),
+            unlit: false,
+            translucent: false,
         })
     }
 
@@ -184,6 +186,40 @@ impl ComponentLoader for SceneLoader<'_> {
                 let tint = parse_color(p.get("Tint"), [1.0; 4]);
                 let ov = p.get("MaterialOverride").and_then(Value::as_str).map(|s| self.assets.material(self.r, s));
                 self.assets.spawn(scene, go, &m, tint, ov);
+                true
+            }
+            "TextRenderer" => {
+                let Some(ts) = p.get("TextScope") else { return true };
+                let f = |k: &str, d: f64| ts.get(k).and_then(Value::as_f64).unwrap_or(d);
+                let family = ts.get("FontName").and_then(Value::as_str).unwrap_or("Poppins");
+                let weight = f("FontWeight", 400.0) as i64;
+                let italic = ts.get("FontItalic").and_then(Value::as_bool).unwrap_or(false);
+                let font = self.assets.fs.as_ref().and_then(|fs| {
+                    crate::text::font_files(family, weight, italic)
+                        .iter()
+                        .find_map(|path| fs.read_raw(path))
+                        .and_then(|d| ab_glyph::FontVec::try_from_vec(d).ok())
+                });
+                if let Some(font) = font {
+                    let st = crate::text::TextStyle {
+                        text: ts.get("Text").and_then(Value::as_str).unwrap_or("").to_string(),
+                        color: parse_color(ts.get("TextColor"), [1.0; 4]),
+                        font: family.to_string(),
+                        size: f("FontSize", 32.0) as f32,
+                        weight,
+                        italic,
+                        line_height: f("LineHeight", 1.0) as f32,
+                        align: match p.get("TextAlignment").and_then(Value::as_str) {
+                            Some("Left") => -1,
+                            Some("Right") => 1,
+                            _ => 0,
+                        },
+                        scale: p.get("Scale").and_then(Value::as_f64).unwrap_or(1.0) as f32,
+                    };
+                    crate::text::spawn_text(scene, self.r, go, &font, &st);
+                } else {
+                    log::warn!("font not found: {family}");
+                }
                 true
             }
             "CubeController" => {

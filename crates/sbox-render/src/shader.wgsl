@@ -196,5 +196,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let att = clamp(1.0 - d / g.point_pos[i].w, 0.0, 1.0);
         color += shade(n, v, to_l / max(d, 0.001), g.point_color[i].rgb * att * att, albedo, rough, metal);
     }
+    if ((flags & 4u) != 0u) {
+        return vec4<f32>(albedo, obj.tint.a * albedo4.a);
+    }
     return vec4<f32>(aces(color), obj.tint.a);
 }

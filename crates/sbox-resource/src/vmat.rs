@@ -105,6 +105,12 @@ impl GameFs {
         Self { roots }
     }
 
+    /// Read a file that is shipped as-is (fonts, ...), without the compiled `_c` suffix.
+    pub fn read_raw(&self, virtual_path: &str) -> Option<Vec<u8>> {
+        let rel = virtual_path.trim_start_matches('/');
+        self.roots.iter().find_map(|r| std::fs::read(r.join(rel)).ok())
+    }
+
     pub fn read(&self, virtual_path: &str) -> Option<Vec<u8>> {
         let rel = virtual_path.trim_start_matches('/');
         let compiled = if rel.ends_with("_c") { rel.to_string() } else { format!("{rel}_c") };

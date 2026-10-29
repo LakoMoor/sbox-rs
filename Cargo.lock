@@ -2322,6 +2322,7 @@ dependencies = [
 name = "sbox-app"
 version = "0.1.0"
 dependencies = [
+ "ab_glyph",
  "anyhow",
  "env_logger",
  "log",

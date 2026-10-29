@@ -1,6 +1,7 @@
 mod assets;
 mod audio;
 mod game;
+mod text;
 
 use std::sync::Arc;
 use std::time::Instant;
