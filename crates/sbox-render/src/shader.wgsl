@@ -67,6 +67,11 @@ fn vs_main(in: VsIn) -> VsOut {
     return out;
 }
 
+// Narkowicz ACES filmic fit; scene lights are HDR (values > 1).
+fn aces(x: vec3<f32>) -> vec3<f32> {
+    return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let n = normalize(in.normal);
@@ -81,5 +86,6 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         light += g.point_color[i].rgb * max(dot(n, to_l / max(d, 0.001)), 0.0) * att * att;
     }
     let albedo = textureSample(color_tex, color_samp, in.uv * mat.uv_scale.xy);
-    return vec4<f32>(obj.tint.rgb * mat.tint.rgb * albedo.rgb * light, obj.tint.a);
+    let hdr = obj.tint.rgb * mat.tint.rgb * albedo.rgb * light;
+    return vec4<f32>(aces(hdr), obj.tint.a);
 }
