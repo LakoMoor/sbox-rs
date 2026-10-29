@@ -494,11 +494,11 @@ impl ComponentLoader for SceneLoader<'_> {
 
 impl Assets {
     /// Instantiate the world nodes of a compiled map (`maps/<name>/world.vwrld_c`) as model objects.
-    /// Returns the number of objects spawned and the world bounds.
-    pub fn load_map(&mut self, scene: &mut Scene, r: &mut Renderer, world_path: &str) -> (usize, Vec3, Vec3) {
+    /// Returns the number of objects spawned, the world bounds and what the map entities provided.
+    pub fn load_map(&mut self, scene: &mut Scene, r: &mut Renderer, world_path: &str) -> (usize, Vec3, Vec3, MapEntities) {
         use sbox_resource::{kv3, Resource, Value};
         let (mut mins, mut maxs) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
-        let Some(fs) = &self.fs else { return (0, mins, maxs) };
+        let Some(fs) = &self.fs else { return (0, mins, maxs, MapEntities::default()) };
         let kv_of = |p: &str| -> Option<Value> {
             let d = fs.read(p)?;
             let res = Resource::parse(&d).ok()?;
@@ -506,8 +506,9 @@ impl Assets {
         };
         let Some(world) = kv_of(world_path) else {
             log::warn!("map not found: {world_path}");
-            return (0, mins, maxs);
+            return (0, mins, maxs, MapEntities::default());
         };
+        let lumps: Vec<String> = world.get("m_entityLumps").and_then(Value::as_array).unwrap_or(&[]).iter().filter_map(|v| v.as_str().map(String::from)).collect();
         let prefixes: Vec<String> = world
             .get("m_worldNodes")
             .and_then(Value::as_array)
@@ -556,8 +557,89 @@ impl Assets {
             }
             count += 1;
         }
-        (count, mins, maxs)
+        let mut info = MapEntities::default();
+        for lump in lumps {
+            let Some(bytes) = self.fs.as_ref().and_then(|fs| fs.read(&format!("{lump}"))) else { continue };
+            match sbox_resource::vents::load(&bytes) {
+                Ok(ents) => {
+                    for e in &ents {
+                        self.spawn_entity(scene, r, e, &mut info);
+                    }
+                }
+                Err(e) => log::warn!("entity lump {lump}: {e:#}"),
+            }
+        }
+        (count, mins, maxs, info)
     }
+
+    /// Instantiate one map entity. Unknown classes are ignored.
+    fn spawn_entity(&mut self, scene: &mut Scene, r: &mut Renderer, e: &sbox_resource::vents::Entity, info: &mut MapEntities) {
+        use sbox_math::{Angles, Quat};
+        let [ox, oy, oz] = e.origin();
+        let [pitch, yaw, roll] = e.angles();
+        let rotation = Angles::new(pitch, yaw, roll).to_rotation();
+        let [sx, sy, sz] = e.scales();
+        let transform = Transform::new(Vec3::new(ox, oy, oz), rotation, Vec3::new(sx, sy, sz));
+        let rgb = |e: &sbox_resource::vents::Entity| {
+            let c = e.color("color").unwrap_or([255; 4]);
+            let b = e.float("brightness").unwrap_or(1.0);
+            [c[0] as f32 / 255.0 * b, c[1] as f32 / 255.0 * b, c[2] as f32 / 255.0 * b]
+        };
+        if e.bool("enabled") == Some(false) {
+            return;
+        }
+        match e.classname() {
+            "light_environment" => {
+                let go = scene.create_object("light_environment");
+                scene.set_local_transform(go, Transform::new(Vec3::ZERO, rotation, Vec3::ONE));
+                scene.add_component(go, DirectionalLight { color: rgb(e), ..Default::default() });
+                info.has_sun = true;
+            }
+            "light_omni" | "light_omni2" => {
+                let go = scene.create_object("light_omni");
+                scene.set_local_transform(go, Transform::from_position(transform.position));
+                scene.add_component(go, PointLight { color: rgb(e), radius: e.float("range").unwrap_or(512.0), intensity: 1.0 });
+            }
+            "light_spot" => {
+                let go = scene.create_object("light_spot");
+                scene.set_local_transform(go, Transform::new(transform.position, rotation, Vec3::ONE));
+                let outer = e.float("outerconeangle").unwrap_or(45.0);
+                scene.add_component(
+                    go,
+                    sbox_scene::SpotLight { color: rgb(e), radius: e.float("range").unwrap_or(512.0), intensity: 1.0, cone_inner: e.float("innerconeangle").unwrap_or(30.0).min(outer), cone_outer: outer },
+                );
+            }
+            "env_sky" => {
+                if let Some(mat) = e.string("skyname").filter(|s| !s.is_empty()) {
+                    let t = e.color("tint_color").unwrap_or([255; 4]);
+                    self.load_sky(r, mat, [t[0] as f32 / 255.0, t[1] as f32 / 255.0, t[2] as f32 / 255.0, 1.0]);
+                }
+            }
+            "info_player_start" => {
+                if info.player_start.is_none() {
+                    info.player_start = Some((transform.position, yaw));
+                }
+            }
+            "prop_physics" | "prop_dynamic" | "prop_static" => {
+                let Some(model) = e.string("model").filter(|s| !s.is_empty()) else { return };
+                let Some(m) = self.load_model(r, &model.replace('\\', "/")) else { return };
+                let go = scene.create_object("prop");
+                scene.set_local_transform(go, transform);
+                self.spawn(scene, go, &m, [1.0; 4], None);
+                info.props += 1;
+            }
+            _ => {}
+        }
+        let _ = Quat::IDENTITY;
+    }
+}
+
+/// What the entity lump of a map provided.
+#[derive(Default)]
+pub struct MapEntities {
+    pub has_sun: bool,
+    pub player_start: Option<(Vec3, f32)>,
+    pub props: usize,
 }
 
 /// First `*.vtex` path mentioned in a compiled resource's reference list.

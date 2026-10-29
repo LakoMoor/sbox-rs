@@ -161,15 +161,21 @@ impl App {
         let args: Vec<String> = std::env::args().collect();
         let game = args.iter().position(|a| a == "--game").and_then(|i| args.get(i + 1)).expect("--game <game dir>");
         let mut assets = Assets::new(Some(vmat::GameFs::from_game_dir(game)));
-        let (n, mins, maxs) = assets.load_map(scene, r, world);
-        log::info!("map {world}: {n} objects, bounds {mins} .. {maxs}");
-        let sun = scene.create_object("sun");
-        scene.set_local_transform(sun, Transform::new(Vec3::ZERO, Angles::new(50.0, 30.0, 0.0).to_rotation(), Vec3::ONE));
-        scene.add_component(sun, DirectionalLight::default());
+        let (n, mins, maxs, ents) = assets.load_map(scene, r, world);
+        log::info!("map {world}: {n} objects, bounds {mins} .. {maxs}, {} props, sun {}", ents.props, ents.has_sun);
+        if !ents.has_sun {
+            let sun = scene.create_object("sun");
+            scene.set_local_transform(sun, Transform::new(Vec3::ZERO, Angles::new(50.0, 30.0, 0.0).to_rotation(), Vec3::ONE));
+            scene.add_component(sun, DirectionalLight::default());
+        }
         let center = if n > 0 { (mins + maxs) * 0.5 } else { Vec3::ZERO };
         let extent = if n > 0 { (maxs - mins).length() } else { 500.0 };
         let cam = scene.create_object("camera");
-        scene.set_local_transform(cam, Transform::new(center + Vec3::new(-extent * 0.4, 0.0, extent * 0.2), Angles::new(15.0, 0.0, 0.0).to_rotation(), Vec3::ONE));
+        let (cam_pos, cam_angles) = match ents.player_start {
+            Some((p, yaw)) => (p + Vec3::Z * 64.0, Angles::new(0.0, yaw, 0.0)),
+            None => (center + Vec3::new(-extent * 0.4, 0.0, extent * 0.2), Angles::new(15.0, 0.0, 0.0)),
+        };
+        scene.set_local_transform(cam, Transform::new(cam_pos, cam_angles.to_rotation(), Vec3::ONE));
         scene.add_component(cam, CameraComponent::default());
         scene.add_component(cam, FlyCamera::default());
         scene.insert_resource(Input::default());

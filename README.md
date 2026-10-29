@@ -48,7 +48,7 @@ Checked on the `game/` directory produced by the official `Setup` step:
 - `ModelCollider` is approximated by the model bounding box; `MeshComponent` polygon meshes are decoded from the half-edge `Topology` blob and rendered per material (UVs from `TextureCoord`, flat normals, no collision, component-local `Position`/`Rotation` ignored)
 - Post-processing: the scene renders to an Rgba16F target and a post pass applies `Tonemapping` (ACES / AgX approximation / Reinhard with an EV exposure and a stateless auto exposure: 8x8 grid geometric-mean luminance mapped to mid grey, clamped to Minimum/MaximumExposure read as multipliers (unverified against s&box), no temporal adaptation), `Bloom` (32-tap single-pass blur of the bright-pass), `Vignette`, `Sharpen` (4-neighbour unsharp mask) and `DepthOfField` (24-tap gather weighted by each sample's circle of confusion, read from the depth buffer; distance is view-space depth), `AmbientOcclusion` (12-tap SSAO from the depth buffer, normals from depth neighbours, applied to the lit image, no denoise), `ChromaticAberration` (red/blue channels shifted by `Offset` pixels), `GradientFog` (distance fog from the depth buffer with a height fade over the fog object's Z; `CubemapFog` and `VolumetricFogVolume` are not supported); `ScreenSpaceReflections` is ignored. Components saved with `__enabled: false` are skipped by the scene loader
 - `SpotLight` is a real cone light (smoothstep between inner and outer angle; no shadows; shares the 8-slot point light array)
-- Maps: world nodes (`vwrld_c` / `vwnod_c`) are loaded with `--map <maps/x/world.vwrld_c> --game <game dir>`; map entities (`vents_c`), lightmaps and visibility are ignored
+- Maps: world nodes (`vwrld_c` / `vwnod_c`) are loaded with `--map <maps/x/world.vwrld_c> --game <game dir>`; map entities (`vents_c`) are decoded (`sbox_resource::vents`: MurmurHash2-hashed keys, typed values) and `light_environment`, `light_omni`, `light_spot`, `env_sky`, `info_player_start` and `prop_*` are spawned; other entity classes, lightmaps, light probes and visibility are ignored
 - Prefab instances/variables, most scene component types (only models, lights, camera, rigidbody and colliders are mapped)
 - Scripting: game code is written as Rust components (see [Scripting](#scripting)); C# is not executed
 
@@ -129,7 +129,7 @@ Done (see "Not done yet" for the approximations): scene / prefab loading, maps f
 
 Open, in rough order of value:
 
-1. Map entities (`vents_c`: binary key-values with hashed key names, type codes not yet decoded)
+1. More map entity classes (triggers, `func_*`, hinges, fog / light probe volumes); the `vents_c` format itself is decoded
 2. `ScreenSpaceReflections`, `CubemapFog`, `VolumetricFogVolume`
 3. A real UI layer (panels, layout, input routing) behind `ScreenPanel` / `WorldPanel`
 4. Real shader translation: `.shader_c` is compiled GPU bytecode, so this means re-implementing the shaders by hand per material family
