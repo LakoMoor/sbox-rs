@@ -193,7 +193,7 @@ impl App {
         let fs = assets.fs.take();
 
         let args: Vec<String> = std::env::args().collect();
-        if let (Some(gp), Some(fs)) = (args.iter().position(|a| a == "--graph").and_then(|i| args.get(i + 1)), fs.as_ref()) {
+        if let (Some(gp), Some(_)) = (args.iter().position(|a| a == "--graph").and_then(|i| args.get(i + 1)), fs.as_ref()) {
             let g = sbox_resource::animgraph::Graph::parse(&std::fs::read(gp).expect("read graph")).expect("parse graph");
             log::info!("{gp}: {} nodes, {} parameters", g.nodes.len(), g.params.len());
             let mut ga = game::GraphAnimator::new(g, vmat::GameFs::from_game_dir(game_dir.expect("game dir")), md.skeleton.clone(), parts.clone());

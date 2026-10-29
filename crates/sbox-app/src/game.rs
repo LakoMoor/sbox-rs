@@ -110,7 +110,6 @@ impl GraphAnimator {
 impl Component for GraphAnimator {
     fn on_update(&mut self, scene: &mut Scene, _h: Handle) {
         let mut lens: std::collections::HashMap<String, f32> = Default::default();
-        let mut lens: std::collections::HashMap<String, f32> = Default::default();
         let samples = {
             let mut inst = std::mem::replace(&mut self.instance, sbox_resource::animgraph::Instance::new(&self.graph));
             let graph = std::mem::take(&mut self.graph);
