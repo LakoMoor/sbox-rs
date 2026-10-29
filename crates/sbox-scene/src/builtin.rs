@@ -110,3 +110,37 @@ impl Component for SpotLight {
 /// Opaque handle to a material owned by the renderer (0 = default white).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub struct MaterialId(pub u32);
+
+/// Screen-space bloom: bright areas (above `threshold`) are blurred and added back.
+pub struct Bloom {
+    pub strength: f32,
+    pub threshold: f32,
+    pub tint: [f32; 3],
+}
+
+impl Default for Bloom {
+    fn default() -> Self {
+        Self { strength: 1.0, threshold: 1.0, tint: [1.0; 3] }
+    }
+}
+
+impl Component for Bloom {
+    impl_component_any!();
+}
+
+/// Darkens the screen edges.
+pub struct Vignette {
+    pub intensity: f32,
+    pub smoothness: f32,
+    pub roundness: f32,
+}
+
+impl Default for Vignette {
+    fn default() -> Self {
+        Self { intensity: 1.0, smoothness: 1.0, roundness: 1.0 }
+    }
+}
+
+impl Component for Vignette {
+    impl_component_any!();
+}

@@ -281,7 +281,18 @@ impl ComponentLoader for SceneLoader<'_> {
                 }
                 true
             }
-            "Bloom" | "EnvmapProbe" => true,
+            "Bloom" => {
+                let c = parse_color(p.get("Tint"), [1.0; 4]);
+                let f = |k: &str, d: f64| p.get(k).and_then(Value::as_f64).unwrap_or(d) as f32;
+                scene.add_component(go, sbox_scene::Bloom { strength: f("Strength", 1.0), threshold: f("Threshold", 1.0), tint: [c[0], c[1], c[2]] });
+                true
+            }
+            "Vignette" => {
+                let f = |k: &str, d: f64| p.get(k).and_then(Value::as_f64).unwrap_or(d) as f32;
+                scene.add_component(go, sbox_scene::Vignette { intensity: f("Intensity", 1.0), smoothness: f("Smoothness", 1.0), roundness: f("Roundness", 1.0) });
+                true
+            }
+            "EnvmapProbe" => true,
             "DirectionalLight" => {
                 let c = parse_color(p.get("LightColor"), [1.0; 4]);
                 let a = parse_color(p.get("SkyColor"), [0.15, 0.17, 0.2, 1.0]);

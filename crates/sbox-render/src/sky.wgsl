@@ -35,5 +35,5 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // Source 2 cubemap faces are stored in the engine's Z-up world space, so the direction is used as-is (left/right handedness unverified)
     let d = vec3<f32>(dir.x, dir.y, dir.z);
     let c = textureSample(sky_tex, sky_samp, d).rgb * sky.params.x * sky.tint.rgb;
-    return vec4<f32>(aces(c), 1.0);
+    return vec4<f32>(c, 1.0);
 }

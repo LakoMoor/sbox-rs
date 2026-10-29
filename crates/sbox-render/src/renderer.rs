@@ -3,12 +3,14 @@ use anyhow::{anyhow, Result};
 use bytemuck::{Pod, Zeroable};
 use sbox_math::{sbox_to_view, Mat4, RotationExt, Transform, Vec3};
 use sbox_resource::vtex::{TexFormat, Texture};
-use sbox_scene::{CameraComponent, DirectionalLight, MaterialId, MeshId, ModelRenderer, PointLight, Scene, SpotLight};
+use sbox_scene::{Bloom, Vignette, CameraComponent, DirectionalLight, MaterialId, MeshId, ModelRenderer, PointLight, Scene, SpotLight};
 use wgpu::util::DeviceExt;
 
 const MAX_POINT_LIGHTS: usize = 8;
 const MAX_BONES: usize = 32768;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+/// The scene is rendered in linear HDR and tone mapped by the post pass.
+const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 const SHADOW_SIZE: u32 = 2048;
 /// Half-extent (world units) of the directional shadow volume centred on the camera.
 const SHADOW_RADIUS: f32 = 1800.0;
@@ -77,6 +79,20 @@ impl Default for MaterialDesc {
     }
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct PostUniform {
+    params: [f32; 4],
+    bloom_tint: [f32; 4],
+    extra: [f32; 4],
+}
+
+struct HdrTarget {
+    size: (u32, u32),
+    view: wgpu::TextureView,
+    bind_group: wgpu::BindGroup,
+}
+
 struct GpuMaterial {
     bind_group: wgpu::BindGroup,
     translucent: bool,
@@ -127,6 +143,10 @@ pub struct Renderer {
     object_capacity: usize,
     object_stride: u64,
     depth_view: wgpu::TextureView,
+    post_pipeline: wgpu::RenderPipeline,
+    post_layout: wgpu::BindGroupLayout,
+    post_buf: wgpu::Buffer,
+    hdr: Option<HdrTarget>,
     meshes: Vec<GpuMesh>,
     material_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
@@ -366,7 +386,7 @@ impl Renderer {
                 entry_point: Some("fs_main"),
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format,
+                    format: HDR_FORMAT,
                     blend: Some(if additive {
                         wgpu::BlendState {
                             color: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::SrcAlpha, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add },
@@ -434,6 +454,7 @@ impl Renderer {
         });
 
         let depth_view = Self::make_depth(&device, w, h);
+        let (post_pipeline, post_layout, post_buf) = Self::make_post(&device, config.format);
         let mut this = Self {
             surface,
             device,
@@ -451,6 +472,10 @@ impl Renderer {
             object_capacity,
             object_stride,
             depth_view,
+            post_pipeline,
+            post_layout,
+            post_buf,
+            hdr: None,
             meshes: vec![],
             material_layout,
             sampler,
@@ -634,7 +659,7 @@ impl Renderer {
                 module: &shader,
                 entry_point: Some("fs_main"),
                 compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState { format: self.config.format, blend: None, write_mask: wgpu::ColorWrites::ALL })],
+                targets: &[Some(wgpu::ColorTargetState { format: HDR_FORMAT, blend: None, write_mask: wgpu::ColorWrites::ALL })],
             }),
             primitive: Default::default(),
             depth_stencil: Some(wgpu::DepthStencilState {
@@ -729,6 +754,74 @@ impl Renderer {
             .create_view(&Default::default())
     }
 
+    fn make_post(device: &wgpu::Device, format: wgpu::TextureFormat) -> (wgpu::RenderPipeline, wgpu::BindGroupLayout, wgpu::Buffer) {
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("post"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry { binding: 1, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering), count: None },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+                    count: None,
+                },
+            ],
+        });
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("post"), source: wgpu::ShaderSource::Wgsl(include_str!("post.wgsl").into()) });
+        let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("post"), bind_group_layouts: &[&layout], push_constant_ranges: &[] });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("post"),
+            layout: Some(&pl),
+            vertex: wgpu::VertexState { module: &shader, entry_point: Some("vs_main"), compilation_options: Default::default(), buffers: &[] },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState { format, blend: None, write_mask: wgpu::ColorWrites::ALL })],
+            }),
+            primitive: Default::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            multiview: None,
+            cache: None,
+        });
+        let buf = device.create_buffer(&wgpu::BufferDescriptor { label: Some("post"), size: std::mem::size_of::<PostUniform>() as u64, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        (pipeline, layout, buf)
+    }
+
+    fn ensure_hdr(&mut self, size: (u32, u32)) {
+        if self.hdr.as_ref().is_some_and(|h| h.size == size) {
+            return;
+        }
+        let tex = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("hdr"),
+            size: wgpu::Extent3d { width: size.0, height: size.1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: HDR_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = tex.create_view(&Default::default());
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("post"),
+            layout: &self.post_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                wgpu::BindGroupEntry { binding: 2, resource: self.post_buf.as_entire_binding() },
+            ],
+        });
+        self.hdr = Some(HdrTarget { size, view, bind_group });
+    }
+
     pub fn resize(&mut self, w: u32, h: u32) {
         if w == 0 || h == 0 {
             return;
@@ -771,7 +864,8 @@ impl Renderer {
         let view = frame.texture.create_view(&Default::default());
         let depth = self.depth_view.clone();
         let aspect = self.aspect();
-        self.draw(scene, &view, &depth, aspect)?;
+        let size = (self.config.width, self.config.height);
+        self.draw(scene, &view, &depth, size)?;
         frame.present();
         Ok(())
     }
@@ -790,7 +884,7 @@ impl Renderer {
         });
         let view = tex.create_view(&Default::default());
         let depth = Self::make_depth(&self.device, w, h);
-        self.draw(scene, &view, &depth, w as f32 / h as f32)?;
+        self.draw(scene, &view, &depth, (w, h))?;
 
         let row = (w * 4).div_ceil(256) * 256;
         let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -829,7 +923,9 @@ impl Renderer {
         Ok(out)
     }
 
-    fn draw(&mut self, scene: &Scene, view: &wgpu::TextureView, depth: &wgpu::TextureView, aspect: f32) -> Result<()> {
+    fn draw(&mut self, scene: &Scene, view: &wgpu::TextureView, depth: &wgpu::TextureView, size: (u32, u32)) -> Result<()> {
+        let aspect = size.0 as f32 / size.1 as f32;
+        self.ensure_hdr(size);
         let cam = scene.iter_components::<CameraComponent>().max_by_key(|(_, c)| c.priority);
         let (cam_xf, clear, view_proj) = match cam {
             Some((go, c)) => {
@@ -973,7 +1069,7 @@ impl Renderer {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("main"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view,
+                    view: &self.hdr.as_ref().unwrap().view,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
@@ -1021,6 +1117,26 @@ impl Renderer {
                     pass.draw_indexed(0..m.index_count, 0, 0..1);
                 }
             }
+        }
+        {
+            let bloom = scene.iter_components::<Bloom>().next().map(|(_, b)| b);
+            let vig = scene.iter_components::<Vignette>().next().map(|(_, v)| v);
+            let post = PostUniform {
+                params: [bloom.map_or(0.0, |b| b.strength), bloom.map_or(1.0, |b| b.threshold), vig.map_or(0.0, |v| v.intensity), vig.map_or(1.0, |v| v.smoothness)],
+                bloom_tint: bloom.map_or([1.0; 4], |b| [b.tint[0], b.tint[1], b.tint[2], 1.0]),
+                extra: [vig.map_or(0.0, |v| v.roundness), aspect, 0.03, 0.0],
+            };
+            self.queue.write_buffer(&self.post_buf, 0, bytemuck::bytes_of(&post));
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("post"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment { view, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store } })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.post_pipeline);
+            pass.set_bind_group(0, &self.hdr.as_ref().unwrap().bind_group, &[]);
+            pass.draw(0..3, 0..1);
         }
         self.queue.submit(Some(enc.finish()));
         Ok(())

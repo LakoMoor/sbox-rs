@@ -212,5 +212,5 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     if ((flags & 16u) != 0u) {
         alpha = alpha * mat.tint.a * albedo4.a;
     }
-    return vec4<f32>(aces(color), alpha);
+    return vec4<f32>(color, alpha);
 }
