@@ -47,7 +47,8 @@ impl Material {
         self.floats.get(name).copied().unwrap_or(default)
     }
     pub fn color_texture(&self) -> Option<&str> {
-        self.textures.get("g_tColor").map(String::as_str)
+        // `blendable` materials have layered colour textures; the first layer stands in for the blend.
+        self.textures.get("g_tColor").or_else(|| self.textures.get("g_tColorA")).map(String::as_str)
     }
 }
 

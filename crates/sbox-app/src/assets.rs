@@ -87,7 +87,7 @@ impl Assets {
         };
         let normal = load_linear(m.normal_texture());
         let rma = load_linear(m.rma_texture());
-        r.create_material_ex(&MaterialDesc {
+        let mut desc = MaterialDesc {
             color: tex,
             normal,
             rma,
@@ -100,7 +100,9 @@ impl Assets {
             translucent: m.flag("F_TRANSLUCENT"),
             additive: false,
             alpha_cutoff: if m.flag("F_ALPHA_TEST") { m.float("g_flAlphaTestReference", 0.5) } else { 0.0 },
-        })
+        };
+        crate::families::Family::of(&m.shader).apply(&mut desc);
+        r.create_material_ex(&desc)
     }
 
     /// Resolve a sky material to its HDR cubemap and install it on the renderer.

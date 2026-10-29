@@ -1,5 +1,6 @@
 mod assets;
 mod audio;
+mod families;
 mod game;
 mod layout;
 mod meshcomp;
