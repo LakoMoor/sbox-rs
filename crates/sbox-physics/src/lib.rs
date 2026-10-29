@@ -111,6 +111,8 @@ impl Component for Collider {
 
 pub struct Physics {
     pub gravity: Vec3,
+    /// When false `step` does nothing (a network client lets the server move the bodies).
+    pub enabled: bool,
     pipeline: PhysicsPipeline,
     params: IntegrationParameters,
     islands: IslandManager,
@@ -131,6 +133,7 @@ impl Default for Physics {
     fn default() -> Self {
         Self {
             gravity: Vec3::new(0.0, 0.0, -800.0),
+            enabled: true,
             pipeline: PhysicsPipeline::new(),
             params: IntegrationParameters::default(),
             islands: IslandManager::new(),
@@ -294,6 +297,9 @@ impl Physics {
     }
 
     pub fn step(&mut self, scene: &mut Scene) {
+        if !self.enabled {
+            return;
+        }
         self.register_new(scene);
         self.drive_players(scene);
         self.params.dt = scene.fixed_delta.max(1e-4);

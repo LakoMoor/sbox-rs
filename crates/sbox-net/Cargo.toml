@@ -6,3 +6,5 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+sbox-math.workspace = true
+sbox-scene.workspace = true

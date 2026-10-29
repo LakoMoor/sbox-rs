@@ -2338,6 +2338,7 @@ dependencies = [
  "pollster",
  "rodio",
  "sbox-math",
+ "sbox-net",
  "sbox-physics",
  "sbox-render",
  "sbox-resource",
@@ -2359,6 +2360,8 @@ name = "sbox-net"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "sbox-math",
+ "sbox-scene",
 ]
 
 [[package]]

@@ -96,6 +96,13 @@ struct App {
     ui_font: Option<ab_glyph::FontVec>,
     /// Cursor position in physical pixels.
     cursor: (f32, f32),
+    net: Option<Net>,
+}
+
+/// `--host <addr>` serves the physics props to clients; `--join <addr>` mirrors a server's props.
+enum Net {
+    Host(sbox_net::Server),
+    Join(sbox_net::Client, Instant),
 }
 
 impl App {
@@ -214,6 +221,61 @@ impl App {
             });
         }
         Some((ui, font))
+    }
+
+    /// Start networking from `--host <addr>` / `--join <addr>`. Rigidbody objects get ids in scene order, which is the same
+    /// on both sides as long as both load the same map / scene.
+    fn start_net(scene: &mut Scene, args: &[String]) -> Option<Net> {
+        use sbox_net::replication::NetworkId;
+        let arg = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
+        let (host, join) = (arg("--host"), arg("--join"));
+        if host.is_none() && join.is_none() {
+            return None;
+        }
+        let bodies: Vec<_> = scene.all_objects().filter(|g| scene.component::<sbox_physics::Rigidbody>(*g).is_some()).collect();
+        for (i, go) in bodies.into_iter().enumerate() {
+            scene.add_component(go, NetworkId(i as u32));
+        }
+        if let Some(addr) = host {
+            match sbox_net::Server::bind(&addr) {
+                Ok(s) => {
+                    log::info!("hosting on {}", s.local_addr().map(|a| a.to_string()).unwrap_or(addr));
+                    return Some(Net::Host(s));
+                }
+                Err(e) => log::error!("--host {addr}: {e:#}"),
+            }
+        }
+        if let Some(addr) = join {
+            if let Some(p) = scene.resource_mut::<sbox_physics::Physics>() {
+                p.enabled = false;
+            }
+            match sbox_net::Client::connect(&addr, "player") {
+                Ok(c) => return Some(Net::Join(c, Instant::now())),
+                Err(e) => log::error!("--join {addr}: {e:#}"),
+            }
+        }
+        None
+    }
+
+    /// Per-frame networking: the host handles clients and broadcasts props, a client applies the latest snapshot.
+    fn pump_net(&mut self) {
+        match &mut self.net {
+            Some(Net::Host(server)) => {
+                for e in server.poll() {
+                    log::info!("net: {e:?}");
+                }
+                server.broadcast(&sbox_net::replication::collect(&self.scene));
+            }
+            Some(Net::Join(client, last_try)) => {
+                client.poll();
+                if client.client_id.is_none() && last_try.elapsed().as_secs_f32() > 0.5 {
+                    client.retry_connect("player");
+                    *last_try = Instant::now();
+                }
+                sbox_net::replication::apply(&mut self.scene, client, 0.3);
+            }
+            None => {}
+        }
     }
 
     /// Re-rasterise the labels of text fields that changed and refresh the overlay.
@@ -371,6 +433,7 @@ impl ApplicationHandler for App {
         let args: Vec<String> = std::env::args().skip(1).collect();
         let model = args.iter().find(|a| !a.starts_with("--") && a.ends_with(".vmdl_c")).cloned();
         self.camera = Some(Self::build_scene(&mut self.scene, &mut renderer, model.as_deref(), args.iter().position(|a| a == "--anim").and_then(|i| args.get(i + 1)).map(String::as_str), args.iter().position(|a| a == "--scene").and_then(|i| args.get(i + 1)).map(String::as_str)));
+        self.net = Self::start_net(&mut self.scene, &args);
         if let Some((ui, font)) = Self::build_ui(&mut renderer, &args) {
             self.ui = Some(ui);
             self.ui_font = Some(font);
@@ -571,6 +634,7 @@ impl ApplicationHandler for App {
                 let dt = (now - self.last).as_secs_f32().min(0.1);
                 self.last = now;
                 self.scene.tick(dt);
+                self.pump_net();
                 if let Some(r) = &mut self.renderer {
                     if let Err(e) = r.render(&self.scene) {
                         log::error!("render: {e:#}");
@@ -590,7 +654,7 @@ fn main() -> anyhow::Result<()> {
     env_logger::init();
     let el = EventLoop::new()?;
     el.set_control_flow(ControlFlow::Poll);
-    let mut app = App { window: None, renderer: None, scene: Scene::new(), camera: None, last: Instant::now(), audio: None, ui: None, ui_font: None, cursor: (0.0, 0.0) };
+    let mut app = App { window: None, renderer: None, scene: Scene::new(), camera: None, last: Instant::now(), audio: None, ui: None, ui_font: None, cursor: (0.0, 0.0), net: None };
     el.run_app(&mut app)?;
     Ok(())
 }

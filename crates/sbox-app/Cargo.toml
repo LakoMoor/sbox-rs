@@ -9,6 +9,7 @@ sbox-scene.workspace = true
 sbox-render.workspace = true
 sbox-resource.workspace = true
 sbox-physics.workspace = true
+sbox-net.workspace = true
 winit.workspace = true
 wgpu.workspace = true
 pollster.workspace = true

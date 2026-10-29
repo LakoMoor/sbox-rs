@@ -366,3 +366,84 @@ mod tests {
         }));
     }
 }
+
+/// Scene replication: objects carrying a [`NetworkId`] have their world transform sent by the server and applied on the
+/// client, which must have loaded the same scene (objects are matched by id, not spawned).
+pub mod replication {
+    use super::{Client, EntityState};
+    use sbox_math::{Quat, Transform, Vec3};
+    use sbox_scene::{impl_component_any, Component, Scene};
+
+    /// Marks an object as replicated; ids must be unique and identical on server and clients.
+    pub struct NetworkId(pub u32);
+    impl Component for NetworkId {
+        impl_component_any!();
+    }
+
+    /// World transforms of every networked object.
+    pub fn collect(scene: &Scene) -> Vec<EntityState> {
+        scene
+            .iter_components::<NetworkId>()
+            .map(|(go, n)| {
+                let t = scene.world_transform(go);
+                EntityState { id: n.0, position: t.position.to_array(), rotation: t.rotation.to_array() }
+            })
+            .collect()
+    }
+
+    /// Move networked objects towards the client's latest state. `blend` is the fraction of the remaining distance covered
+    /// (1.0 snaps; smaller values smooth between the snapshots). Ids the client has no state for are left alone.
+    pub fn apply(scene: &mut Scene, client: &Client, blend: f32) {
+        let targets: Vec<_> = scene.iter_components::<NetworkId>().filter_map(|(go, n)| client.entities.get(&n.0).map(|e| (go, e.clone()))).collect();
+        for (go, e) in targets {
+            let cur = scene.world_transform(go);
+            let goal = Transform::new(Vec3::from(e.position), Quat::from_array(e.rotation).normalize(), cur.scale);
+            scene.set_world_transform(go, Transform::lerp(&cur, &goal, blend.clamp(0.0, 1.0)));
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::Server;
+
+        #[test]
+        fn server_scene_state_reaches_the_client_scene() {
+            let mut server_scene = Scene::new();
+            let a = server_scene.create_object("a");
+            server_scene.add_component(a, NetworkId(1));
+            server_scene.set_world_transform(a, Transform::from_position(Vec3::new(1.0, 2.0, 3.0)));
+            let local_only = server_scene.create_object("local");
+            server_scene.set_world_transform(local_only, Transform::from_position(Vec3::X));
+
+            let mut client_scene = Scene::new();
+            let ca = client_scene.create_object("a");
+            client_scene.add_component(ca, NetworkId(1));
+
+            let mut server = Server::bind("127.0.0.1:0").unwrap();
+            let mut client = Client::connect(&server.local_addr().unwrap().to_string(), "c").unwrap();
+            for _ in 0..200 {
+                server.poll();
+                client.poll();
+                if client.client_id.is_some() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            let state = collect(&server_scene);
+            assert_eq!(state.len(), 1, "only networked objects are replicated");
+            server.broadcast(&state);
+            for _ in 0..200 {
+                client.poll();
+                if !client.entities.is_empty() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            apply(&mut client_scene, &client, 0.5);
+            assert!((client_scene.world_transform(ca).position - Vec3::new(0.5, 1.0, 1.5)).length() < 1e-4, "half way");
+            apply(&mut client_scene, &client, 1.0);
+            assert!((client_scene.world_transform(ca).position - Vec3::new(1.0, 2.0, 3.0)).length() < 1e-4);
+        }
+    }
+}

@@ -20,7 +20,7 @@ Conventions follow s&box: X forward, Y left, Z up; angles are pitch/yaw/roll in 
 |---|---|---|
 | `sbox-math` | `Sandbox.System/Math` | Vec/Quat (glam), `Angles`, `Transform`, `BBox`, `Ray`, `Plane` |
 | `sbox-scene` | `Sandbox.Engine/Scene` | `Scene` / `GameObject` / `Component`, s&box lifecycle order, hierarchy, deferred destroy, fixed update, systems/resources, `.scene`/`.prefab` JSON loading |
-| `sbox-net` | closed networking layer (Steam Networking) | own authoritative client-server protocol over UDP: connect handshake with retry, per-tick input, MTU-split transform snapshots; the transport only, no scene replication yet |
+| `sbox-net` | closed networking layer (Steam Networking) | own authoritative client-server protocol over UDP: connect handshake with retry, per-tick input, MTU-split transform snapshots; transform replication of `NetworkId` objects |
 | `sbox-physics` | Havok wrapper in the closed core | rapier-based `Rigidbody`, box/sphere/plane colliders, parent-body compound colliders, fixed-step system |
 | `sbox-resource` | closed Source 2 native core | `*_c` container, binary KV3, `vtex_c` textures (BC1-7, LZ4/ZSTD mips, PNG), VBIB vertex/index buffers (meshopt), `vmdl_c` models (multi-mesh, skeleton, skin weights), `vmat_c` materials, `anim_c` animations, `vanmgrph_c` animation graphs, `sound_c` sound events, `vsnd_c` sounds (PCM16 / MP3 / Ogg Vorbis / Opus, 739 / 739 shipped files), `skel_c`, `.vpk` v2 packages, virtual file resolver |
 | `sbox-render` | closed Source 2 native core | wgpu renderer: meshes, GPU skinning, materials with BC textures, directional + point lights, 2048² directional shadow map with PCF, BC6H HDR cubemap sky, ACES tone mapping, normal maps (derivative TBN), GGX specular with RMA / metalness, off-screen rendering |
@@ -134,7 +134,7 @@ Open, in rough order of value:
 2. `ScreenSpaceReflections`
 3. UI beyond the basic panels / buttons / text fields: scrolling, text selection and placing the caret by mouse (the caret moves with the arrow keys / Home / End and Delete works), nested layouts (only a single flex-like `layout::Stack` exists: row / column, padding, gap, fixed / grow sizes, cross-axis alignment, used by `--ui-demo`), and `ScreenPanel` / `WorldPanel` (Razor) compatibility
 4. Real shader translation: `.shader_c` is compiled GPU bytecode, so this means re-implementing the shaders by hand per material family
-5. Networking: `sbox-net` has the UDP transport (chosen design: authoritative server, own protocol); still missing: replicating scene objects / components, client-side prediction and interpolation, RPCs, and wiring into `sbox-app` (`--host` / `--join`)
+5. Networking: `sbox-net` has the UDP transport (authoritative server, own protocol) and `replication` (objects with a `NetworkId` have their world transform broadcast by the server and eased in by the client; `sbox-app --host <addr>` / `--join <addr>` number the Rigidbody objects in scene order, so both sides must load the same map / scene, and a client pauses its own physics). Checked end to end only as far as the handshake between two processes; missing: spawning / despawning, component replication, players (client input is sent by the transport but the host does not act on it), prediction, RPCs, packet loss handling beyond dropping stale snapshots
 6. Scripting: Rust components are the supported path; an embedded .NET runtime would be needed to run original C# unchanged
 
 ## License
