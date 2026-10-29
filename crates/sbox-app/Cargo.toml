@@ -1,0 +1,17 @@
+[package]
+name = "sbox-app"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+sbox-math.workspace = true
+sbox-scene.workspace = true
+sbox-render.workspace = true
+sbox-resource.workspace = true
+winit.workspace = true
+wgpu.workspace = true
+pollster.workspace = true
+env_logger.workspace = true
+log.workspace = true
+anyhow.workspace = true
+png = "0.17"

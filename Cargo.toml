@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = ["crates/sbox-math", "crates/sbox-scene", "crates/sbox-render", "crates/sbox-app", "crates/sbox-resource"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+glam = { version = "0.29", features = ["bytemuck"] }
+bytemuck = { version = "1", features = ["derive"] }
+wgpu = "24"
+winit = "0.30"
+pollster = "0.4"
+log = "0.4"
+env_logger = "0.11"
+slotmap = "1"
+anyhow = "1"
+sbox-math = { path = "crates/sbox-math" }
+sbox-scene = { path = "crates/sbox-scene" }
+sbox-render = { path = "crates/sbox-render" }
+sbox-resource = { path = "crates/sbox-resource" }

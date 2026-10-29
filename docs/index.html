@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>sbox-rs — s&amp;box на Rust + wgpu</title>
+<meta name="description" content="Экспериментальный порт s&amp;box на Rust и wgpu: модель сцены, загрузчики форматов Source 2 и рендерер.">
+<link rel="icon" type="image/svg+xml" href="logo.svg">
+<style>
+  :root { --bg:#12151d; --panel:#1b2030; --line:#2c3347; --text:#e8ebf3; --dim:#98a1b8; --accent:#ff9a4d; --ok:#5fd38d; --todo:#c9a24d; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:16px/1.6 system-ui, "Segoe UI", Roboto, sans-serif; }
+  a { color:var(--accent); text-decoration:none; } a:hover { text-decoration:underline; }
+  .wrap { max-width:980px; margin:0 auto; padding:0 24px; }
+  header { padding:72px 0 40px; display:flex; gap:32px; align-items:center; flex-wrap:wrap; }
+  header img { width:128px; height:128px; }
+  h1 { margin:0 0 8px; font-size:44px; letter-spacing:-.02em; }
+  .lead { color:var(--dim); font-size:19px; margin:0 0 20px; max-width:560px; }
+  .btn { display:inline-block; padding:10px 18px; border-radius:10px; border:1px solid var(--line); background:var(--panel); color:var(--text); margin-right:10px; }
+  .btn.primary { background:var(--accent); color:#1a1205; border-color:var(--accent); font-weight:600; }
+  section { padding:36px 0; border-top:1px solid var(--line); }
+  h2 { margin:0 0 16px; font-size:26px; }
+  .shots { display:grid; grid-template-columns:repeat(auto-fit, minmax(380px, 1fr)); gap:16px; }
+  .shots img { width:100%; border-radius:12px; border:1px solid var(--line); display:block; }
+  .shots figcaption { color:var(--dim); font-size:14px; margin-top:6px; }
+  figure { margin:0; }
+  table { width:100%; border-collapse:collapse; background:var(--panel); border:1px solid var(--line); border-radius:12px; overflow:hidden; }
+  th, td { text-align:left; padding:10px 14px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { color:var(--dim); font-weight:500; font-size:14px; }
+  tr:last-child td { border-bottom:none; }
+  .ok { color:var(--ok); } .todo { color:var(--todo); }
+  code, pre { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size:14px; }
+  pre { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:16px; overflow:auto; }
+  code { background:var(--panel); padding:1px 6px; border-radius:6px; }
+  pre code { background:none; padding:0; }
+  footer { padding:32px 0 56px; color:var(--dim); font-size:14px; border-top:1px solid var(--line); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <img src="logo.svg" alt="sbox-rs logo">
+    <div>
+      <h1>sbox-rs</h1>
+      <p class="lead">Экспериментальный порт <a href="https://github.com/Facepunch/sbox-public">s&amp;box</a> на Rust и wgpu: модель сцены, загрузчики форматов Source 2 и рендерер.</p>
+      <a class="btn primary" href="https://github.com/LakoMoor/sbox-rs">GitHub</a>
+      <a class="btn" href="#status">Статус</a>
+      <a class="btn" href="#build">Сборка</a>
+    </div>
+  </header>
+
+  <section>
+    <h2>Скриншоты</h2>
+    <div class="shots">
+      <figure><img src="img/demo-scene.png" alt="Демо-сцена"><figcaption>Демо-сцена: направленный и точечный свет, глубина, иерархия объектов.</figcaption></figure>
+      <figure><img src="img/demo-scene-2.png" alt="Демо-сцена, другой момент"><figcaption>Тот же кадр спустя 4 секунды симуляции (компоненты <code>Spinner</code>).</figcaption></figure>
+    </div>
+    <p style="color:var(--dim);font-size:14px">Кадры отрисованы самим рендерером без захвата экрана: <code>sbox-app --screenshot out.png</code>. Ассеты игры в репозиторий не входят.</p>
+  </section>
+
+  <section id="status">
+    <h2>Что готово</h2>
+    <table>
+      <tr><th>Крейт</th><th>Назначение</th><th>Статус</th></tr>
+      <tr><td><code>sbox-math</code></td><td>Vec/Quat, Angles, Transform, BBox, Ray, Plane в соглашениях s&amp;box (X вперёд, Y влево, Z вверх)</td><td class="ok">готово</td></tr>
+      <tr><td><code>sbox-scene</code></td><td>Scene / GameObject / Component, жизненный цикл, иерархия, отложенное удаление, fixed update</td><td class="ok">готово</td></tr>
+      <tr><td><code>sbox-resource</code></td><td>Контейнер <code>*_c</code>, бинарный KV3, текстуры <code>vtex_c</code> (BC1–7, LZ4/ZSTD), VBIB (meshopt), меши <code>vmdl_c</code></td><td class="ok">проверено на 6878 файлах</td></tr>
+      <tr><td><code>sbox-render</code></td><td>wgpu: меши, направленный и точечные источники, глубина, off-screen рендер</td><td class="ok">базовый</td></tr>
+      <tr><td>Материалы <code>vmat_c</code>, шейдеры</td><td>Текстуры в рендерере, PBR, тени</td><td class="todo">не начато</td></tr>
+      <tr><td>Скелеты и анимации</td><td><code>anim_c</code>, скиннинг</td><td class="todo">не начато</td></tr>
+      <tr><td>Физика, звук, ввод, сеть, UI</td><td>rapier, vsnd_c, Input, Networking, Razor</td><td class="todo">не начато</td></tr>
+      <tr><td>Скриптинг</td><td>Игровой код s&amp;box написан на C# — нужно решение: Rust-API или встроенный .NET</td><td class="todo">не решено</td></tr>
+    </table>
+    <p>Проверка форматов на реальных файлах: контейнер 6878/6878, KV3 6999/7014 блоков, текстуры 2618/2618 (размеры мипов совпадают до байта), модели 743/744.</p>
+    <p><strong>Важно:</strong> это не полный порт и не замена движка. Исходный s&amp;box — около миллиона строк C# поверх закрытого ядра Source 2; здесь воспроизводятся форматы и базовый рантайм.</p>
+  </section>
+
+  <section id="build">
+    <h2>Сборка</h2>
+<pre><code>git clone https://github.com/LakoMoor/sbox-rs
+cd sbox-rs
+cargo run -p sbox-app --release</code></pre>
+    <p>Чтобы открыть реальную модель, нужны файлы игры. Склонируйте <a href="https://github.com/Facepunch/sbox-public">sbox-public</a>, выполните там <code>Setup.bat</code> (скачает бинарники и ресурсы) и укажите путь:</p>
+<pre><code>cargo run -p sbox-app --release -- path/to/game/core/models/arrow.vmdl_c</code></pre>
+  </section>
+
+  <footer>
+    Неофициальный проект, не связан с Facepunch Studios и Valve. s&amp;box и Source 2 принадлежат их владельцам. Код sbox-rs — MIT.
+  </footer>
+</div>
+</body>
+</html>

@@ -1,0 +1,9 @@
+[package]
+name = "sbox-scene"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+sbox-math.workspace = true
+slotmap.workspace = true
+log.workspace = true

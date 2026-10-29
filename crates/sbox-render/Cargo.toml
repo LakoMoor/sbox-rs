@@ -1,0 +1,14 @@
+[package]
+name = "sbox-render"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+sbox-math.workspace = true
+sbox-scene.workspace = true
+sbox-resource.workspace = true
+wgpu.workspace = true
+bytemuck.workspace = true
+pollster.workspace = true
+log.workspace = true
+anyhow.workspace = true
