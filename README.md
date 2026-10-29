@@ -37,7 +37,7 @@ Checked on the `game/` directory produced by the official `Setup` step:
 
 ### Not done yet
 
-- Prefabs (`prefab_c`, same JSON as scenes with a `RootObject`) all 58 load, and their particles are simulated (sphere / cone emitters, curves, additive or alpha billboards), but sprite-sheet textures are drawn whole instead of frame by frame (the sheet layout in the `vtex_c` extra data is not decoded), and collisions, trails, `Decal` and post-processing are ignored
+- Prefabs (`prefab_c`, same JSON as scenes with a `RootObject`) all 58 load, and their particles are simulated (sphere / cone emitters, curves, additive or alpha billboards), with sprite-sheet frames decoded from the `vtex_c` extra data (cell origins; frame chosen by particle age, not by the authored sequence curves), but collisions, trails, `Decal` and post-processing are ignored
 
 - Animation graphs are evaluated in a reduced form (sequence, blend, 2D blend, selector, state machines with parameter/time/tag conditions); additive layers, bone masks, IK, look-at / aim, root motion and in-model (`ANIM` block) animations are not
 - External `vmesh_c` references, `.shader_c` shaders (materials are approximated by a fixed PBR shader)

@@ -110,6 +110,8 @@ pub struct Texture {
     pub reflectivity: [f32; 4],
     /// Mip levels, largest first. Each holds `depth` (or 6 faces for cubemaps) images back to back.
     pub mips: Vec<Vec<u8>>,
+    /// Sprite-sheet frames of the first sequence: UV origin of each cell (cells are `1 / ceil(sqrt(n))` wide).
+    pub sheet: Vec<[f32; 2]>,
 }
 
 impl Texture {
@@ -150,6 +152,7 @@ pub fn parse(file: &[u8]) -> Result<Texture> {
     // Extra data table: entries of (type, offset, size) relative to their own position.
     let mut compressed_sizes: Option<Vec<u32>> = None;
     let mut compression = 0u32;
+    let mut sheet: Vec<[f32; 2]> = Vec::new();
     for i in 0..extra_count {
         let e = 32 + extra_offset + i * 12;
         if e + 12 > d.len() {
@@ -158,6 +161,25 @@ pub fn parse(file: &[u8]) -> Result<Texture> {
         let ty = u32_at(d, e);
         let off = e + 4 + u32_at(d, e + 4) as usize;
         let _size = u32_at(d, e + 8) as usize;
+        // type 2 = sprite sheet: header { u32 n, u32 sequences, .. u32 rel_offset @16, u32 frame_count @20 };
+        // each frame is { f32 duration, u32 rel_offset, u32 images }, rel_offset points (from its own field)
+        // to an image record whose f32s [4], [5] are the UV origin of the cell.
+        if ty == 2 && off + 24 <= d.len() {
+            let seq = off + 16 + u32_at(d, off + 16) as usize;
+            let n = u32_at(d, off + 20) as usize;
+            for k in 0..n.min(4096) {
+                let f = seq + k * 12;
+                if f + 12 > d.len() {
+                    break;
+                }
+                let rec = f + 4 + u32_at(d, f + 4) as usize;
+                if rec + 24 > d.len() {
+                    break;
+                }
+                let fl = |o: usize| f32::from_bits(u32_at(d, rec + o));
+                sheet.push([fl(16), fl(20)]);
+            }
+        }
         // type 4 = compressed mip sizes: { u32 compressed, u32 table_offset (from its own field), u32 count }
         if ty == 4 && off + 12 <= d.len() {
             compression = u32_at(d, off);
@@ -195,6 +217,7 @@ pub fn parse(file: &[u8]) -> Result<Texture> {
             flags,
             reflectivity,
             mips: vec![rgba],
+            sheet: Vec::new(),
         });
     }
 
@@ -231,7 +254,7 @@ pub fn parse(file: &[u8]) -> Result<Texture> {
         }
     }
     ensure!(pos == file.len(), "texture data size mismatch: used {} of {}", pos - tail_start, file.len() - tail_start);
-    Ok(Texture { width, height, depth, format, flags, reflectivity, mips })
+    Ok(Texture { width, height, depth, format, flags, reflectivity, mips, sheet })
 }
 
 fn zstd_decode(src: &[u8], expected: usize) -> Result<Vec<u8>> {
@@ -241,4 +264,19 @@ fn zstd_decode(src: &[u8], expected: usize) -> Result<Vec<u8>> {
     dec.read_to_end(&mut out)?;
     ensure!(out.len() == expected, "zstd size mismatch: {} != {expected}", out.len());
     Ok(out)
+}
+
+#[cfg(test)]
+mod sheet_tests {
+    use super::*;
+
+    #[test]
+    fn explosion_sheet_has_64_cells_on_an_8x8_grid() {
+        let Ok(b) = std::fs::read("E:/sbox-ref/game/core/textures/particles/flame/explosion/explosion_01.vtex_c") else { return };
+        let t = parse(&b).unwrap();
+        assert_eq!(t.sheet.len(), 64);
+        // frame 1 sits one cell down, frame 8 one cell right
+        assert!((t.sheet[1][1] - 0.125).abs() < 0.01 && t.sheet[1][0] < 0.01, "{:?}", t.sheet[1]);
+        assert!((t.sheet[8][0] - 0.125).abs() < 0.01 && t.sheet[8][1] < 0.01, "{:?}", t.sheet[8]);
+    }
 }

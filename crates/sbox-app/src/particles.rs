@@ -286,21 +286,33 @@ impl Component for ParticleEmitter {
 pub struct ParticleSpriteRenderer {
     pub scale: f32,
     pool: Vec<GoId>,
-    pub mesh: sbox_scene::MeshId,
+    /// One quad per sheet frame (a single entry for plain sprites).
+    pub meshes: Vec<sbox_scene::MeshId>,
     pub material: sbox_scene::MaterialId,
     pub brightness_applies: bool,
 }
 
 impl ParticleSpriteRenderer {
     /// `texture` is the sprite's first frame; `additive` selects additive blending.
-    pub fn new(r: &mut Renderer, tex: Option<sbox_render::TextureId>, scale: f32, additive: bool) -> Self {
+    pub fn new(r: &mut Renderer, tex: Option<sbox_render::TextureId>, sheet: &[[f32; 2]], scale: f32, additive: bool) -> Self {
         let material = r.create_material_ex(&MaterialDesc { color: tex, unlit: true, translucent: true, additive, ..Default::default() });
         let v = |y: f32, z: f32, u: f32, vv: f32| Vertex { position: [0.0, y, z], normal: [1.0, 0.0, 0.0], uv: [u, vv], joints: [0; 4], weights: [0.0; 4] };
-        let mesh = r.upload_mesh(&MeshData {
-            vertices: vec![v(0.5, 0.5, 0.0, 0.0), v(-0.5, 0.5, 1.0, 0.0), v(-0.5, -0.5, 1.0, 1.0), v(0.5, -0.5, 0.0, 1.0)],
-            indices: vec![0, 1, 2, 0, 2, 3],
-        });
-        Self { scale, pool: Vec::new(), mesh, material, brightness_applies: additive }
+        let cells: Vec<([f32; 2], f32)> = if sheet.is_empty() {
+            vec![([0.0, 0.0], 1.0)]
+        } else {
+            let size = 1.0 / (sheet.len() as f32).sqrt().ceil();
+            sheet.iter().map(|o| (*o, size)).collect()
+        };
+        let meshes = cells
+            .iter()
+            .map(|&([u0, v0], s)| {
+                r.upload_mesh(&MeshData {
+                    vertices: vec![v(0.5, 0.5, u0, v0), v(-0.5, 0.5, u0 + s, v0), v(-0.5, -0.5, u0 + s, v0 + s), v(0.5, -0.5, u0, v0 + s)],
+                    indices: vec![0, 1, 2, 0, 2, 3],
+                })
+            })
+            .collect();
+        Self { scale, pool: Vec::new(), meshes, material, brightness_applies: additive }
     }
 }
 
@@ -308,7 +320,8 @@ impl Component for ParticleSpriteRenderer {
     fn on_update(&mut self, scene: &mut Scene, h: Handle) {
         let cam = scene.iter_components::<CameraComponent>().next().map(|(go, _)| scene.world_transform(go).position);
         // Snapshot render state first (the effect lives on the same object).
-        let draws: Vec<(Vec3, f32, f32, [f32; 4])> = match scene.component::<ParticleEffect>(h.go) {
+        let nframes = self.meshes.len();
+        let draws: Vec<(Vec3, f32, f32, [f32; 4], usize)> = match scene.component::<ParticleEffect>(h.go) {
             Some(fx) => fx
                 .particles
                 .iter()
@@ -319,14 +332,14 @@ impl Component for ParticleSpriteRenderer {
                     let alpha = fx.alpha.eval(life, r(10)).clamp(0.0, 1.0) * fx.tint[3];
                     let c: [f32; 4] = std::array::from_fn(|i| fx.color_a[i] + (fx.color_b[i] - fx.color_a[i]) * r(11));
                     let b = if self.brightness_applies { fx.brightness.eval(life, r(12)).clamp(0.0, 4.0) } else { 1.0 };
-                    (p.pos, size, p.roll, [c[0] * fx.tint[0] * b, c[1] * fx.tint[1] * b, c[2] * fx.tint[2] * b, alpha * c[3]])
+                    (p.pos, size, p.roll, [c[0] * fx.tint[0] * b, c[1] * fx.tint[1] * b, c[2] * fx.tint[2] * b, alpha * c[3]], ((life.clamp(0.0, 0.9999)) * nframes as f32) as usize)
                 })
                 .collect(),
             None => return,
         };
         while self.pool.len() < draws.len() {
             let go = scene.create_object_in(Some(h.go), "particle");
-            let mut m = ModelRenderer::new(self.mesh);
+            let mut m = ModelRenderer::new(self.meshes[0]);
             m.material = self.material;
             m.cast_shadows = false;
             scene.add_component(go, m);
@@ -334,13 +347,14 @@ impl Component for ParticleSpriteRenderer {
         }
         for (i, &go) in self.pool.iter().enumerate() {
             match draws.get(i) {
-                Some(&(pos, size, roll, color)) => {
+                Some(&(pos, size, roll, color, frame)) => {
                     let to_cam = cam.map_or(Vec3::X, |c| (c - pos).normalize_or_zero());
                     let pitch = -to_cam.z.clamp(-1.0, 1.0).asin().to_degrees();
                     let yaw = to_cam.y.atan2(to_cam.x).to_degrees();
                     scene.set_world_transform(go, Transform::new(pos, Angles::new(pitch, yaw, roll).to_rotation(), Vec3::splat(size.max(0.001))));
                     if let Some(m) = scene.component_mut::<ModelRenderer>(go) {
                         m.tint = color;
+                        m.mesh = self.meshes[frame.min(self.meshes.len() - 1)];
                     }
                 }
                 None => {
