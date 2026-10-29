@@ -428,6 +428,37 @@ impl ComponentLoader for SceneLoader<'_> {
                 scene.add_component(go, m);
                 true
             }
+            "MeshComponent" => {
+                // Editor polygon mesh: triangulated per material slot; its collision shape is not created.
+                if p.get("HideInGame").and_then(Value::as_bool) == Some(true) {
+                    return true;
+                }
+                let groups = match crate::meshcomp::build(p) {
+                    Ok(g) => g,
+                    Err(e) => {
+                        log::warn!("MeshComponent: {e:#}");
+                        return true;
+                    }
+                };
+                let materials: Vec<String> = p
+                    .get("Mesh")
+                    .and_then(|m| m.get("Materials"))
+                    .and_then(Value::as_array)
+                    .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                    .unwrap_or_default();
+                let tint = parse_color(p.get("Color"), [1.0; 4]);
+                for (slot, md) in groups {
+                    let mesh = self.r.upload_mesh(&md);
+                    let child = scene.create_object_in(Some(go), "mesh");
+                    let mut m = ModelRenderer::new(mesh);
+                    m.tint = tint;
+                    if let Some(path) = materials.get(slot) {
+                        m.material = self.assets.material(self.r, path);
+                    }
+                    scene.add_component(child, m);
+                }
+                true
+            }
             "ModelCollider" => {
                 // Approximation: the collision shape is the model's bounding box (the real one is a `vphys_c` hull set).
                 let Some(path) = p.get("Model").and_then(Value::as_str) else { return true };

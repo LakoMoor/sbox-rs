@@ -1,6 +1,7 @@
 mod assets;
 mod audio;
 mod game;
+mod meshcomp;
 mod particles;
 mod text;
 
