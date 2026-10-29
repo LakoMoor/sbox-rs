@@ -1,4 +1,5 @@
 mod assets;
+mod audio;
 mod game;
 
 use std::sync::Arc;
@@ -85,6 +86,7 @@ struct App {
     scene: Scene,
     camera: Option<sbox_scene::GoId>,
     last: Instant,
+    audio: Option<audio::Audio>,
 }
 
 impl App {
@@ -273,6 +275,15 @@ impl ApplicationHandler for App {
             el.exit();
             return;
         }
+        if let Some(i) = args.iter().position(|a| a == "--sound") {
+            let path = args.get(i + 1).expect("--sound <file.vsnd_c>");
+            self.audio = audio::Audio::new();
+            match (&mut self.audio, std::fs::read(path)) {
+                (Some(a), Ok(b)) => log::info!("sound {path}: {}", if a.play(&b, args.iter().any(|x| x == "--loop"), 0.8) { "playing" } else { "not playing" }),
+                (None, _) => log::warn!("no audio output device"),
+                (_, Err(e)) => log::warn!("read {path}: {e}"),
+            }
+        }
         self.renderer = Some(renderer);
         self.window = Some(window);
         self.last = Instant::now();
@@ -368,7 +379,7 @@ fn main() -> anyhow::Result<()> {
     env_logger::init();
     let el = EventLoop::new()?;
     el.set_control_flow(ControlFlow::Poll);
-    let mut app = App { window: None, renderer: None, scene: Scene::new(), camera: None, last: Instant::now() };
+    let mut app = App { window: None, renderer: None, scene: Scene::new(), camera: None, last: Instant::now(), audio: None };
     el.run_app(&mut app)?;
     Ok(())
 }

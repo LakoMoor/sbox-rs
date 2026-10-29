@@ -9,6 +9,7 @@ pub mod mesh;
 pub mod model;
 pub mod vbib;
 pub mod vmat;
+pub mod vsnd;
 pub mod vtex;
 
 pub use container::{Block, Resource};
