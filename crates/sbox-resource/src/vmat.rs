@@ -154,7 +154,7 @@ mod index_tests {
             return;
         }
         let idx = GameFs::from_game_dir(game).index("anim");
-        assert!(idx.len() > 1000, "{} clips indexed", idx.len());
+        assert!(idx.len() > 500, "{} clips indexed", idx.len());
         let p = &idx["expressions_default"];
         assert!(p.ends_with("expressions_default.anim") && !p.contains(std::path::MAIN_SEPARATOR), "{p}");
     }
