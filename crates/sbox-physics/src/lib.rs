@@ -24,7 +24,7 @@ impl Component for Rigidbody {
 }
 
 /// First-person capsule controller (`Sandbox.PlayerController`, reduced).
-/// Actions read from [`Input`]: Forward, Backward, Left, Right, Jump, Run.
+/// Actions read from [`Input`]: Forward, Backward, Left, Right, Jump, Run, Duck.
 pub struct PlayerController {
     pub walk_speed: f32,
     pub run_speed: f32,
@@ -32,6 +32,11 @@ pub struct PlayerController {
     pub radius: f32,
     pub height: f32,
     pub eye_height: f32,
+    /// Walking speed and eye height while the `Duck` action is held.
+    pub duck_speed: f32,
+    pub duck_eye_height: f32,
+    /// Eye height when standing; `eye_height` eases between this and the ducked height.
+    pub stand_eye_height: f32,
     /// Mouse sensitivity in degrees per pixel.
     pub sensitivity: f32,
     /// Object moved to the eye position and rotated by yaw/pitch every step.
@@ -49,6 +54,9 @@ impl Default for PlayerController {
             radius: 16.0,
             height: 72.0,
             eye_height: 64.0,
+            duck_speed: 90.0,
+            duck_eye_height: 40.0,
+            stand_eye_height: 64.0,
             sensitivity: 0.1,
             camera: None,
             yaw: 0.0,
@@ -228,7 +236,11 @@ impl Physics {
             let fwd = Vec3::new(yaw.cos(), yaw.sin(), 0.0);
             let left = Vec3::new(-yaw.sin(), yaw.cos(), 0.0);
             let wish = fwd * input.axis("Forward", "Backward") + left * input.axis("Left", "Right");
-            let speed = if input.down("Run") { pc.run_speed } else { pc.walk_speed };
+            let ducking = input.down("Duck");
+            let speed = if ducking { pc.duck_speed } else if input.down("Run") { pc.run_speed } else { pc.walk_speed };
+            // Ease the camera towards the standing / ducked eye height.
+            let target = if ducking { pc.duck_eye_height } else { pc.stand_eye_height };
+            pc.eye_height += (target - pc.eye_height) * 0.3;
             let wish = wish.normalize_or_zero() * speed;
             let jump = pc.jump_speed;
             if let Some(b) = self.bodies.get_mut(h) {
@@ -337,6 +349,33 @@ mod tests {
         assert!(max_z > 20.0, "player should have jumped, max z={max_z}");
         let c = scene.world_transform(cam).position;
         assert!(c.z > 50.0, "camera follows eye height, z={}", c.z);
+    }
+
+    #[test]
+    fn ducking_slows_the_player_and_lowers_the_eye() {
+        let mut scene = Scene::new();
+        Physics::install(&mut scene);
+        scene.insert_resource(Input::default());
+        let ground = scene.create_object("ground");
+        scene.add_component(ground, Collider { shape: Shape::Plane, is_trigger: false });
+        let cam = scene.create_object("cam");
+        let player = scene.create_object("player");
+        scene.add_component(player, PlayerController { camera: Some(cam), ..Default::default() });
+        for _ in 0..25 {
+            scene.tick(1.0 / 50.0);
+        }
+        {
+            let input = scene.resource_mut::<Input>().unwrap();
+            input.set("Forward", true);
+            input.set("Duck", true);
+        }
+        for _ in 0..50 {
+            scene.tick(1.0 / 50.0);
+        }
+        let x = scene.world_transform(player).position.x;
+        assert!((60.0..120.0).contains(&x), "ducked player should cover ~90u in a second, x={x}");
+        let eye = scene.world_transform(cam).position.z;
+        assert!(eye < 50.0, "camera should drop towards the duck eye height, z={eye}");
     }
 
     #[test]

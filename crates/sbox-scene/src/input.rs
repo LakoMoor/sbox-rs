@@ -6,9 +6,12 @@ use std::collections::HashSet;
 pub struct Input {
     down: HashSet<String>,
     pressed: HashSet<String>,
+    released: HashSet<String>,
     /// Accumulated since the last `end_frame` (pixels).
     pub mouse_delta: (f32, f32),
     pub mouse_captured: bool,
+    /// Wheel notches accumulated since the last `end_frame` (positive = away from the user).
+    pub mouse_wheel: f32,
 }
 
 impl Input {
@@ -17,8 +20,8 @@ impl Input {
             if self.down.insert(action.to_string()) {
                 self.pressed.insert(action.to_string());
             }
-        } else {
-            self.down.remove(action);
+        } else if self.down.remove(action) {
+            self.released.insert(action.to_string());
         }
     }
     pub fn down(&self, action: &str) -> bool {
@@ -27,6 +30,10 @@ impl Input {
     /// True only on the frame the action went down.
     pub fn pressed(&self, action: &str) -> bool {
         self.pressed.contains(action)
+    }
+    /// True only on the frame the action went up.
+    pub fn released(&self, action: &str) -> bool {
+        self.released.contains(action)
     }
     /// Analog helper: +1 for `pos`, -1 for `neg`.
     pub fn axis(&self, pos: &str, neg: &str) -> f32 {
@@ -41,5 +48,7 @@ impl Input {
     }
     pub fn end_frame(&mut self) {
         self.pressed.clear();
+        self.released.clear();
+        self.mouse_wheel = 0.0;
     }
 }

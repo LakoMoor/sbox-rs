@@ -41,7 +41,8 @@ Checked on the `game/` directory produced by the official `Setup` step:
 
 - Animation graphs are evaluated in a reduced form (poses are computed per node: sequence, blend, 2D blend, selector, state machines with parameter/time/tag conditions, `Subtract` / `Add` additive layers; the additive convention `base * delta` is unverified against the real engine); bone-mask nodes blend per bone using the citizen weight lists read from the model source `.vmdl_prefab` (parent blend space only; the model-space variants are treated the same), IK, look-at / aim, root motion and in-model (`ANIM` block) animations are not
 - `.shader_c` shaders are compiled GPU bytecode and are not translated: materials use one fixed PBR shader, with the common `F_*` flags mapped (`F_ALPHA_TEST`, `F_TRANSLUCENT`, `F_UNLIT`); backface rendering, self-illumination, detail textures, multiblend and tint masks are ignored
-- Input system beyond the basic controller, networking, UI
+- Input: actions Forward/Backward/Left/Right/Jump/Run/Duck/Use/Reload/Attack1-3, `released`, mouse wheel; the controller supports ducking (slower, lower eye) but has no crouch collider, slopes/stairs or air control
+- Networking, UI
 - `Decal` is drawn as a flat translucent quad with its `.decal_c` colour texture (no projection onto surfaces, no sequences)
 - `ModelCollider` is approximated by the model bounding box; `MeshComponent` (compressed half-edge `Topology`) is not decoded
 - Post-processing: the scene renders to an Rgba16F target and a post pass applies ACES, `Bloom` (32-tap single-pass blur of the bright-pass) and `Vignette`; `Tonemapping` (auto exposure), `DepthOfField`, `AmbientOcclusion`, `ScreenSpaceReflections`, `Sharpen` are ignored

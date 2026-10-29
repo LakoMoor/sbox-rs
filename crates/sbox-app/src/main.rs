@@ -351,6 +351,9 @@ impl ApplicationHandler for App {
                         KeyCode::KeyD => Some("Right"),
                         KeyCode::Space => Some("Jump"),
                         KeyCode::ShiftLeft => Some("Run"),
+                        KeyCode::ControlLeft => Some("Duck"),
+                        KeyCode::KeyE => Some("Use"),
+                        KeyCode::KeyR => Some("Reload"),
                         _ => None,
                     };
                     if let (Some(a), Some(input)) = (action, self.scene.resource_mut::<Input>()) {
@@ -376,8 +379,29 @@ impl ApplicationHandler for App {
                     }
                 }
             }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let notches = match delta {
+                    winit::event::MouseScrollDelta::LineDelta(_, y) => y,
+                    winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32 / 40.0,
+                };
+                if let Some(input) = self.scene.resource_mut::<Input>() {
+                    input.mouse_wheel += notches;
+                }
+            }
+            WindowEvent::MouseInput { state, button, .. } if button != MouseButton::Left || state == ElementState::Released => {
+                let action = match button {
+                    MouseButton::Left => Some("Attack1"),
+                    MouseButton::Right => Some("Attack2"),
+                    MouseButton::Middle => Some("Attack3"),
+                    _ => None,
+                };
+                if let (Some(a), Some(input)) = (action, self.scene.resource_mut::<Input>()) {
+                    input.set(a, state == ElementState::Pressed);
+                }
+            }
             WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
                 if let (Some(w), Some(input)) = (&self.window, self.scene.resource_mut::<Input>()) {
+                    input.set("Attack1", true);
                     if std::env::args().any(|a| a == "--play") {
                         let ok = w.set_cursor_grab(winit::window::CursorGrabMode::Locked).is_ok()
                             || w.set_cursor_grab(winit::window::CursorGrabMode::Confined).is_ok();
