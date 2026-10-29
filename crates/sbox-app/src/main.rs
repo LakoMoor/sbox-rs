@@ -160,6 +160,12 @@ impl App {
         (r.upload_rgba8(&img, w, h, true), [w as f32 * 0.25, h as f32 * 0.25])
     }
 
+    /// Pixel width `text` rasterises to.
+    fn text_texture_width(font: &ab_glyph::FontVec, text: &str, size: f32) -> f32 {
+        let st = text::TextStyle { text: text.to_string(), color: [1.0; 4], font: "Poppins".into(), size, weight: 600, italic: false, line_height: 1.0, align: -1, scale: 1.0 };
+        text::rasterise(font, &st).1 as f32
+    }
+
     /// `--hud "text"` shows a label in the top-left corner; `--ui-demo` adds a panel with Play / Quit buttons.
     fn build_ui(r: &mut Renderer, args: &[String]) -> Option<(ui::Ui, ab_glyph::FontVec)> {
         let hud = args.iter().position(|a| a == "--hud").map(|i| args.get(i + 1).map_or("sbox-rs", String::as_str));
@@ -203,6 +209,8 @@ impl App {
                 color: [0.1, 0.11, 0.16, 1.0],
                 focus_color: [0.16, 0.18, 0.28, 1.0],
                 label: None,
+                caret: 0,
+                caret_x: 0.0,
             });
         }
         Some((ui, font))
@@ -214,6 +222,8 @@ impl App {
         for i in ui.take_dirty() {
             let text = ui.fields[i].text.clone();
             ui.fields[i].label = (!text.is_empty()).then(|| Self::text_texture(r, font, &text, 24.0));
+            let prefix: String = text.chars().take(ui.fields[i].caret).collect();
+            ui.fields[i].caret_x = if prefix.is_empty() { 0.0 } else { Self::text_texture_width(font, &prefix, 24.0) };
         }
         r.overlay = ui.rects();
     }
@@ -444,6 +454,18 @@ impl ApplicationHandler for App {
                     match &event.logical_key {
                         winit::keyboard::Key::Named(winit::keyboard::NamedKey::Backspace) => {
                             ui.backspace();
+                        }
+                        winit::keyboard::Key::Named(winit::keyboard::NamedKey::Delete) => {
+                            ui.delete_forward();
+                        }
+                        winit::keyboard::Key::Named(k @ (winit::keyboard::NamedKey::ArrowLeft | winit::keyboard::NamedKey::ArrowRight | winit::keyboard::NamedKey::Home | winit::keyboard::NamedKey::End)) => {
+                            use winit::keyboard::NamedKey as K;
+                            ui.move_caret(match k {
+                                K::ArrowLeft => ui::CaretMove::Left,
+                                K::ArrowRight => ui::CaretMove::Right,
+                                K::Home => ui::CaretMove::Home,
+                                _ => ui::CaretMove::End,
+                            });
                         }
                         winit::keyboard::Key::Named(winit::keyboard::NamedKey::Enter | winit::keyboard::NamedKey::Escape) => {
                             if let Some((id, text)) = ui.submit() {

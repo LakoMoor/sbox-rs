@@ -131,7 +131,7 @@ Open, in rough order of value:
 
 1. More map entity classes (`func_shatterglass` is spawned as a static model prop without breaking and `light_ortho` as a wide spot light, both approximations; `phys_hinge` only occurs inside model physics data (`[PR#]part` targets) and needs the joints, which are not simulated; light probe volumes need baked GI, which is not ported); the `vents_c` format itself is decoded
 2. `ScreenSpaceReflections`
-3. UI beyond the basic panels / buttons / text fields: scrolling, caret movement and selection, nested layouts (only a single flex-like `layout::Stack` exists: row / column, padding, gap, fixed / grow sizes, cross-axis alignment, used by `--ui-demo`), and `ScreenPanel` / `WorldPanel` (Razor) compatibility
+3. UI beyond the basic panels / buttons / text fields: scrolling, text selection and placing the caret by mouse (the caret moves with the arrow keys / Home / End and Delete works), nested layouts (only a single flex-like `layout::Stack` exists: row / column, padding, gap, fixed / grow sizes, cross-axis alignment, used by `--ui-demo`), and `ScreenPanel` / `WorldPanel` (Razor) compatibility
 4. Real shader translation: `.shader_c` is compiled GPU bytecode, so this means re-implementing the shaders by hand per material family
 5. Networking (needs a design decision)
 6. Scripting: Rust components are the supported path; an embedded .NET runtime would be needed to run original C# unchanged

@@ -33,6 +33,19 @@ pub struct TextField {
     pub focus_color: [f32; 4],
     /// Rasterised `text` and its pixel size; `None` while the text is empty.
     pub label: Option<(TextureId, [f32; 2])>,
+    /// Caret position as a character index into `text`.
+    pub caret: usize,
+    /// Pixel offset of the caret from the start of the text, measured by the app when the field is reported dirty.
+    pub caret_x: f32,
+}
+
+/// Caret movement keys.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum CaretMove {
+    Left,
+    Right,
+    Home,
+    End,
 }
 
 pub struct Ui {
@@ -78,6 +91,11 @@ impl Ui {
     /// Returns whether a field now has focus.
     pub fn focus_at(&mut self, x: f32, y: f32) -> bool {
         self.focus = self.fields.iter().rposition(|f| contains(&f.rect, x, y));
+        if let Some(i) = self.focus {
+            // The caret starts at the end of the text; `dirty` makes the app measure its offset.
+            self.fields[i].caret = self.fields[i].text.chars().count();
+            self.dirty.push(i);
+        }
         self.focus.is_some()
     }
 
@@ -89,22 +107,60 @@ impl Ui {
         self.focus.map(|i| &self.fields[i])
     }
 
-    /// Typed character for the focused field. Control characters are ignored. Returns whether it was consumed.
+    fn byte_at(text: &str, chars: usize) -> usize {
+        text.char_indices().nth(chars).map_or(text.len(), |(i, _)| i)
+    }
+
+    /// Typed character for the focused field, inserted at the caret. Control characters are ignored.
+    /// Returns whether it was consumed.
     pub fn type_char(&mut self, c: char) -> bool {
         let Some(i) = self.focus else { return false };
         let f = &mut self.fields[i];
         if !c.is_control() && f.text.chars().count() < f.max_len {
-            f.text.push(c);
+            let at = Self::byte_at(&f.text, f.caret);
+            f.text.insert(at, c);
+            f.caret += 1;
             self.dirty.push(i);
         }
         true
     }
 
+    /// Delete the character before the caret.
     pub fn backspace(&mut self) -> bool {
         let Some(i) = self.focus else { return false };
-        if self.fields[i].text.pop().is_some() {
+        let f = &mut self.fields[i];
+        if f.caret > 0 {
+            f.caret -= 1;
+            let at = Self::byte_at(&f.text, f.caret);
+            f.text.remove(at);
             self.dirty.push(i);
         }
+        true
+    }
+
+    /// Delete the character after the caret.
+    pub fn delete_forward(&mut self) -> bool {
+        let Some(i) = self.focus else { return false };
+        let f = &mut self.fields[i];
+        if f.caret < f.text.chars().count() {
+            let at = Self::byte_at(&f.text, f.caret);
+            f.text.remove(at);
+            self.dirty.push(i);
+        }
+        true
+    }
+
+    pub fn move_caret(&mut self, to: CaretMove) -> bool {
+        let Some(i) = self.focus else { return false };
+        let f = &mut self.fields[i];
+        let len = f.text.chars().count();
+        f.caret = match to {
+            CaretMove::Left => f.caret.saturating_sub(1),
+            CaretMove::Right => (f.caret + 1).min(len),
+            CaretMove::Home => 0,
+            CaretMove::End => len,
+        };
+        self.dirty.push(i);
         true
     }
 
@@ -145,8 +201,9 @@ impl Ui {
                 text_right += w;
             }
             if focused {
-                // Caret after the text.
-                out.push(UiRect { texture: self.white, rect: [text_right + 2.0, f.rect[1] + 8.0, 2.0, f.rect[3] - 16.0], tint: [1.0; 4] });
+                // Caret at its measured offset (after the text when the app has not measured yet).
+                let x = if f.caret >= f.text.chars().count() { text_right } else { f.rect[0] + 8.0 + f.caret_x };
+                out.push(UiRect { texture: self.white, rect: [x + 2.0, f.rect[1] + 8.0, 2.0, f.rect[3] - 16.0], tint: [1.0; 4] });
             }
         }
         for l in &self.labels {
@@ -188,7 +245,7 @@ mod tests {
     }
 
     fn field(id: &str, rect: [f32; 4]) -> TextField {
-        TextField { id: id.into(), rect, text: String::new(), max_len: 5, color: [0.1; 4], focus_color: [0.3; 4], label: None }
+        TextField { id: id.into(), rect, text: String::new(), max_len: 5, color: [0.1; 4], focus_color: [0.3; 4], label: None, caret: 0, caret_x: 0.0 }
     }
 
     #[test]
@@ -209,6 +266,32 @@ mod tests {
         assert_eq!(ui.fields[1].text, "hell");
         ui.type_char('\n');
         assert_eq!(ui.fields[1].text, "hell", "control characters are ignored");
+    }
+
+    #[test]
+    fn caret_inserts_and_deletes_in_the_middle() {
+        let mut ui = Ui::new(TextureId(0));
+        ui.fields.push(field("a", [0.0, 0.0, 100.0, 30.0]));
+        ui.focus_at(5.0, 5.0);
+        for c in "abcd".chars() {
+            ui.type_char(c);
+        }
+        ui.move_caret(CaretMove::Left);
+        ui.move_caret(CaretMove::Left);
+        ui.type_char('X');
+        assert_eq!(ui.fields[0].text, "abXcd");
+        assert_eq!(ui.fields[0].caret, 3);
+        ui.backspace();
+        assert_eq!(ui.fields[0].text, "abcd");
+        ui.delete_forward();
+        assert_eq!(ui.fields[0].text, "abd");
+        ui.move_caret(CaretMove::Home);
+        ui.backspace();
+        assert_eq!(ui.fields[0].text, "abd", "nothing before the caret");
+        ui.move_caret(CaretMove::End);
+        assert_eq!(ui.fields[0].caret, 3);
+        ui.move_caret(CaretMove::Right);
+        assert_eq!(ui.fields[0].caret, 3, "clamped to the end");
     }
 
     #[test]
