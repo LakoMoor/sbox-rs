@@ -37,6 +37,8 @@ Checked on the `game/` directory produced by the official `Setup` step:
 
 ### Not done yet
 
+- Prefabs (`prefab_c`, same JSON as scenes with a `RootObject`) all 58 load, but their particle systems (`ParticleEffect`, emitters, sprite renderers), `Decal`, `TemporaryEffect` and the post-processing components are ignored
+
 - Animation graphs are evaluated in a reduced form (sequence, blend, 2D blend, selector, state machines with parameter/time/tag conditions); additive layers, bone masks, IK, look-at / aim, root motion and in-model (`ANIM` block) animations are not
 - External `vmesh_c` references, `.shader_c` shaders (materials are approximated by a fixed PBR shader)
 - VPK, audio (`vsnd_c`), input system, networking, UI

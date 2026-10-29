@@ -222,7 +222,7 @@ impl ComponentLoader for SceneLoader<'_> {
                 }
                 true
             }
-            "SoundPointComponent" => {
+            "SoundPointComponent" | "SoundBoxComponent" => {
                 let Some(ev_path) = p.get("SoundEvent").and_then(Value::as_str) else { return true };
                 let Some(fs) = self.assets.fs.as_ref() else { return true };
                 let Some(ev) = fs.read(ev_path).and_then(|d| sbox_resource::sound_event::parse(&d).ok()) else {
