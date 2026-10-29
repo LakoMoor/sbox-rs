@@ -294,7 +294,17 @@ impl ComponentLoader for SceneLoader<'_> {
                     _ => sbox_scene::TonemapMode::Aces,
                 };
                 let ev = p.get("ExposureCompensation").and_then(Value::as_f64).unwrap_or(0.0) as f32;
-                scene.add_component(go, sbox_scene::Tonemapping { mode, exposure_compensation: ev });
+                let f = |k: &str, d: f64| p.get(k).and_then(Value::as_f64).unwrap_or(d) as f32;
+                scene.add_component(
+                    go,
+                    sbox_scene::Tonemapping {
+                        mode,
+                        exposure_compensation: ev,
+                        auto_exposure: p.get("AutoExposureEnabled").and_then(Value::as_bool).unwrap_or(false),
+                        min_exposure: f("MinimumExposure", 0.25),
+                        max_exposure: f("MaximumExposure", 1.0),
+                    },
+                );
                 true
             }
             "Sharpen" => {

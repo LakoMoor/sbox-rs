@@ -11,6 +11,8 @@ struct Post {
     cam: vec4<f32>, // x = z near, y = z far, z = tan(fov_y / 2), w = aspect
     // xy = ssao radius (0 = off) and intensity, zw = chromatic aberration offset in pixels
     ao: vec4<f32>,
+    // x = auto exposure (1 = on), y = min exposure, z = max exposure
+    tm: vec4<f32>,
 };
 
 @group(0) @binding(0) var hdr_tex: texture_2d<f32>;
@@ -176,7 +178,19 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         }
         c += acc / 32.0 * post.params.x * post.bloom_tint.rgb;
     }
-    var o = tonemap(c * post.bloom_tint.a, post.extra.w);
+    var exposure = post.bloom_tint.a;
+    if (post.tm.x > 0.5) {
+        // Geometric mean luminance over a coarse grid, mapped to mid grey. No temporal adaptation.
+        var sum = 0.0;
+        for (var gy = 0u; gy < 8u; gy = gy + 1u) {
+            for (var gx = 0u; gx < 8u; gx = gx + 1u) {
+                let s = textureSampleLevel(hdr_tex, hdr_samp, (vec2<f32>(f32(gx), f32(gy)) + 0.5) / 8.0, 0.0).rgb;
+                sum += log(max(dot(s, vec3<f32>(0.2126, 0.7152, 0.0722)), 0.0001));
+            }
+        }
+        exposure = exposure * clamp(0.18 / exp(sum / 64.0), post.tm.y, post.tm.z);
+    }
+    var o = tonemap(c * exposure, post.extra.w);
     if (post.params.z > 0.0) {
         let d = (in.uv - vec2<f32>(0.5)) * vec2<f32>(mix(1.0, post.extra.y, post.extra.x), 1.0) * 2.0;
         let v = smoothstep(1.0, 1.0 - clamp(post.params.w, 0.05, 1.0) * 0.8, length(d) / 1.4142);

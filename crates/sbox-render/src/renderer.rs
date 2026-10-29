@@ -89,6 +89,7 @@ struct PostUniform {
     dof: [f32; 4],
     cam: [f32; 4],
     ao: [f32; 4],
+    tm: [f32; 4],
 }
 
 /// A textured screen-space rectangle drawn over the finished frame (`rect` = x, y, width, height in pixels, origin top-left).
@@ -1197,6 +1198,7 @@ impl Renderer {
                 fx: [sharpen, 1.0 / size.0 as f32, 1.0 / size.1 as f32, 0.0],
                 dof: dof.map_or([0.0; 4], |d| [d.focal_distance.max(1.0), d.focus_range, d.blur_size, d.back_blur as u32 as f32 + 2.0 * d.front_blur as u32 as f32]),
                 cam: [z_near, z_far, (fov_y * 0.5).tan(), aspect],
+                tm: tm.map_or([0.0; 4], |t| [t.auto_exposure as u32 as f32, t.min_exposure, t.max_exposure, 0.0]),
                 ao: ao.map_or([0.0, 0.0, ca[0], ca[1]], |a| [a.radius, a.intensity, ca[0], ca[1]]),
             };
             self.queue.write_buffer(&self.post_buf, 0, bytemuck::bytes_of(&post));

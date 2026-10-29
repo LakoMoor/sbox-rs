@@ -157,11 +157,15 @@ pub enum TonemapMode {
 pub struct Tonemapping {
     pub mode: TonemapMode,
     pub exposure_compensation: f32,
+    /// Scale the exposure so the average scene luminance maps to mid grey, within `min_exposure..=max_exposure` (multipliers).
+    pub auto_exposure: bool,
+    pub min_exposure: f32,
+    pub max_exposure: f32,
 }
 
 impl Default for Tonemapping {
     fn default() -> Self {
-        Self { mode: TonemapMode::Aces, exposure_compensation: 0.0 }
+        Self { mode: TonemapMode::Aces, exposure_compensation: 0.0, auto_exposure: false, min_exposure: 0.25, max_exposure: 1.0 }
     }
 }
 
