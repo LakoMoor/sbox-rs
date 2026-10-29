@@ -105,6 +105,31 @@ impl GameFs {
         Self { roots }
     }
 
+    /// Every compiled file with the given source extension (e.g. `"anim"` for `*.anim_c`), as
+    /// `(lowercase file stem, virtual path)`. When a name occurs in several roots the first root wins.
+    pub fn index(&self, ext: &str) -> HashMap<String, String> {
+        let suffix = format!(".{ext}_c");
+        let mut out = HashMap::new();
+        for root in &self.roots {
+            let mut stack = vec![root.clone()];
+            while let Some(dir) = stack.pop() {
+                let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+                for e in rd.flatten() {
+                    let path = e.path();
+                    if path.is_dir() {
+                        stack.push(path);
+                    } else if let Some(name) = path.file_name().and_then(|n| n.to_str()).filter(|n| n.ends_with(&suffix)) {
+                        let stem = name[..name.len() - suffix.len()].to_lowercase();
+                        if let Ok(rel) = path.strip_prefix(root) {
+                            out.entry(stem).or_insert_with(|| rel.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/").trim_end_matches("_c").to_string());
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// Read a file that is shipped as-is (fonts, ...), without the compiled `_c` suffix.
     pub fn read_raw(&self, virtual_path: &str) -> Option<Vec<u8>> {
         let rel = virtual_path.trim_start_matches('/');
@@ -115,5 +140,22 @@ impl GameFs {
         let rel = virtual_path.trim_start_matches('/');
         let compiled = if rel.ends_with("_c") { rel.to_string() } else { format!("{rel}_c") };
         self.roots.iter().find_map(|r| std::fs::read(r.join(&compiled)).ok())
+    }
+}
+
+#[cfg(test)]
+mod index_tests {
+    use super::*;
+
+    #[test]
+    fn index_finds_clips_in_any_folder() {
+        let game = std::path::Path::new("E:/sbox-ref/game");
+        if !game.exists() {
+            return;
+        }
+        let idx = GameFs::from_game_dir(game).index("anim");
+        assert!(idx.len() > 1000, "{} clips indexed", idx.len());
+        let p = &idx["expressions_default"];
+        assert!(p.ends_with("expressions_default.anim") && !p.contains(std::path::MAIN_SEPARATOR), "{p}");
     }
 }

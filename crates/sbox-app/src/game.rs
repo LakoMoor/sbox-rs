@@ -85,6 +85,7 @@ pub struct GraphAnimator {
     pub parts: Vec<sbox_scene::GoId>,
     clips: std::collections::HashMap<String, Option<sbox_resource::anim::Animation>>,
     weight_lists: std::collections::HashMap<String, sbox_resource::weightlist::WeightList>,
+    clip_index: std::collections::HashMap<String, String>,
 }
 
 impl GraphAnimator {
@@ -101,15 +102,17 @@ impl GraphAnimator {
             .and_then(|b| String::from_utf8(b).ok())
             .map(|t| sbox_resource::weightlist::parse(&t))
             .unwrap_or_default();
-        Self { graph, instance, fs, skeleton, anim_skel: None, parts, clips: Default::default(), weight_lists }
+        let clip_index = fs.index("anim");
+        Self { graph, instance, fs, skeleton, anim_skel: None, parts, clips: Default::default(), weight_lists, clip_index }
     }
 
     fn clip(&mut self, name: &str) -> Option<&sbox_resource::anim::Animation> {
         if !self.clips.contains_key(name) {
             let lower = name.to_lowercase();
-            let loaded = ["clips", "clips_human"]
-                .iter()
-                .find_map(|dir| self.fs.read(&format!("{dir}/{lower}.anim")))
+            let loaded = self
+                .clip_index
+                .get(&lower)
+                .and_then(|path| self.fs.read(path))
                 .and_then(|d| sbox_resource::anim::parse(&d).map_err(|e| log::warn!("clip {name}: {e:#}")).ok());
             if loaded.is_none() {
                 log::warn!("clip not found: {name}");
