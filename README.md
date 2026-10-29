@@ -99,7 +99,7 @@ cargo run --release -p sbox-resource --example survey -- path/to/game
 
 1. Animation graphs, additive clips, root motion; clothing (`clothing_c`) and mesh groups
 2. Real shader translation (`vmesh_c` references done)
-3. ~~VPK~~ (v2 reader and `GameFs::add_vpk` done; no automatic mounting of map packages yet)
+3. ~~VPK~~ (v2 reader; `GameFs::from_game_dir` mounts the map packages under `core/maps`)
 4. Scene / prefab loading (`*.scene`, `*.prefab`)
 5. Input + character controller, audio, networking, UI
 6. Scripting story for game code

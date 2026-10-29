@@ -107,7 +107,7 @@ impl GameFs {
         Ok(())
     }
 
-    /// Roots for a standard `game/` directory: `core` plus every `addons/*/Assets` and `addons/*`.
+    /// Roots for a standard `game/` directory: `core` plus every `addons/*/Assets`, `addons/*/Transients` and `addons/*`.
     pub fn from_game_dir(game: impl Into<PathBuf>) -> Self {
         let game = game.into();
         let mut roots = vec![game.join("core")];
@@ -117,10 +117,31 @@ impl GameFs {
                 if p.join("Assets").is_dir() {
                     roots.push(p.join("Assets"));
                 }
+                if p.join("Transients").is_dir() {
+                    roots.push(p.join("Transients"));
+                }
                 roots.push(p);
             }
         }
-        Self { roots, packages: Vec::new() }
+        let mut fs = Self { roots, packages: Vec::new() };
+        fs.mount_map_packages(&game.join("core").join("maps"));
+        fs
+    }
+
+    /// Mount every `*.vpk` under `dir`, skipping `*_bakeresourcecache` packages.
+    pub fn mount_map_packages(&mut self, dir: &std::path::Path) {
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            let Ok(rd) = std::fs::read_dir(&d) else { continue };
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if p.extension().is_some_and(|x| x == "vpk") && !p.to_string_lossy().contains("_bakeresourcecache") {
+                    let _ = self.add_vpk(&p);
+                }
+            }
+        }
     }
 
     /// Every compiled file with the given source extension (e.g. `"anim"` for `*.anim_c`), as
