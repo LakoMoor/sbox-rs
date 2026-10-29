@@ -342,6 +342,11 @@ impl App {
             let c = |o: f32| 0.55 + 0.45 * ((h + o).fract() * std::f32::consts::TAU).cos();
             m.tint = [c(0.0), c(0.33), c(0.66), 1.0];
             self.scene.add_component(go, m);
+            // Only the host simulates: its players are kinematic bodies that shove props around.
+            if matches!(self.net, Some(Net::Host(..))) {
+                self.scene.add_component(go, sbox_physics::Rigidbody { kinematic: true, ..Default::default() });
+                self.scene.add_component(go, sbox_physics::Collider { shape: sbox_physics::Shape::Box { center: Vec3::ZERO, size: Vec3::new(32.0, 32.0, 72.0) }, is_trigger: false });
+            }
         }
     }
 

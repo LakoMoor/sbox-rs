@@ -12,11 +12,13 @@ pub struct Rigidbody {
     pub gravity: bool,
     pub motion_enabled: bool,
     pub mass_override: Option<f32>,
+    /// The body follows the object's transform (set by the game) and pushes dynamic bodies, but is not moved by them.
+    pub kinematic: bool,
 }
 
 impl Default for Rigidbody {
     fn default() -> Self {
-        Self { gravity: true, motion_enabled: true, mass_override: None }
+        Self { gravity: true, motion_enabled: true, mass_override: None, kinematic: false }
     }
 }
 impl Component for Rigidbody {
@@ -195,7 +197,13 @@ impl Physics {
             let world = scene.world_transform(go);
             // Rigidbody on this object -> create its body
             if let Some(rb) = scene.component::<Rigidbody>(go) {
-                let builder = if rb.motion_enabled { RigidBodyBuilder::dynamic() } else { RigidBodyBuilder::fixed() };
+                let builder = if rb.kinematic {
+                    RigidBodyBuilder::kinematic_position_based()
+                } else if rb.motion_enabled {
+                    RigidBodyBuilder::dynamic()
+                } else {
+                    RigidBodyBuilder::fixed()
+                };
                 let body = builder.position(iso(&world)).gravity_scale(if rb.gravity { 1.0 } else { 0.0 }).build();
                 self.body_of.insert(go, self.bodies.insert(body));
             }
@@ -302,6 +310,16 @@ impl Physics {
         }
         self.register_new(scene);
         self.drive_players(scene);
+        // Kinematic bodies are placed by the game: carry their object's transform into the simulation.
+        for (&go, &h) in &self.body_of {
+            if !scene.component::<Rigidbody>(go).is_some_and(|rb| rb.kinematic) {
+                continue;
+            }
+            let w = scene.world_transform(go);
+            if let Some(b) = self.bodies.get_mut(h) {
+                b.set_next_kinematic_position(iso(&Transform::new(w.position, w.rotation, Vec3::ONE)));
+            }
+        }
         self.params.dt = scene.fixed_delta.max(1e-4);
         let g = Vector3::new(self.gravity.x, self.gravity.y, self.gravity.z);
         self.pipeline.step(
@@ -337,6 +355,33 @@ impl Physics {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_kinematic_body_pushes_a_dynamic_one_and_is_not_pushed_back() {
+        let mut scene = Scene::new();
+        Physics::install(&mut scene);
+        let ground = scene.create_object("ground");
+        scene.add_component(ground, Collider { shape: Shape::Plane, is_trigger: false });
+        let wall = scene.create_object("wall");
+        scene.set_world_transform(wall, Transform::from_position(Vec3::new(-100.0, 0.0, 25.0)));
+        scene.add_component(wall, Rigidbody { kinematic: true, ..Default::default() });
+        scene.add_component(wall, Collider { shape: Shape::Box { center: Vec3::ZERO, size: Vec3::new(20.0, 200.0, 50.0) }, is_trigger: false });
+        let ball = scene.create_object("ball");
+        scene.set_world_transform(ball, Transform::from_position(Vec3::new(0.0, 0.0, 25.0)));
+        scene.add_component(ball, Rigidbody { gravity: false, ..Default::default() });
+        scene.add_component(ball, Collider { shape: Shape::Sphere { center: Vec3::ZERO, radius: 25.0 }, is_trigger: false });
+        // The game drives the wall towards +X at 100 u/s for 2 seconds.
+        for _ in 0..100 {
+            let mut t = scene.world_transform(wall);
+            t.position.x += 2.0;
+            scene.set_world_transform(wall, t);
+            scene.tick(1.0 / 50.0);
+        }
+        let (w, b) = (scene.world_transform(wall).position.x, scene.world_transform(ball).position.x);
+        assert!((w - 100.0).abs() < 0.5, "the wall goes where the game puts it, got {w}");
+        assert!(b > 20.0, "the ball was pushed along, got {b}");
+        assert!(b - w > 20.0, "and stays ahead of the wall, wall {w} ball {b}");
+    }
 
     #[test]
     fn compound_hull_and_capsule_rest_on_plane() {

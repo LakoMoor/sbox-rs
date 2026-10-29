@@ -437,6 +437,7 @@ impl ComponentLoader for SceneLoader<'_> {
                         gravity: flag("Gravity", true),
                         motion_enabled: flag("MotionEnabled", true),
                         mass_override: p.get("MassOverride").and_then(Value::as_f64).filter(|m| *m > 0.0).map(|m| m as f32),
+                        kinematic: false,
                     },
                 );
                 true
