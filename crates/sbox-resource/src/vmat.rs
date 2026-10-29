@@ -93,11 +93,18 @@ pub fn parse(file: &[u8]) -> Result<Material> {
 /// appending the `_c` suffix of compiled files.
 pub struct GameFs {
     roots: Vec<PathBuf>,
+    packages: Vec<crate::vpk::Vpk>,
 }
 
 impl GameFs {
     pub fn new(roots: Vec<PathBuf>) -> Self {
-        Self { roots }
+        Self { roots, packages: Vec::new() }
+    }
+
+    /// Mount a `.vpk` package; its files are used when no root directory has them.
+    pub fn add_vpk(&mut self, path: impl AsRef<std::path::Path>) -> Result<()> {
+        self.packages.push(crate::vpk::Vpk::open(path)?);
+        Ok(())
     }
 
     /// Roots for a standard `game/` directory: `core` plus every `addons/*/Assets` and `addons/*`.
@@ -113,7 +120,7 @@ impl GameFs {
                 roots.push(p);
             }
         }
-        Self { roots }
+        Self { roots, packages: Vec::new() }
     }
 
     /// Every compiled file with the given source extension (e.g. `"anim"` for `*.anim_c`), as
@@ -144,13 +151,13 @@ impl GameFs {
     /// Read a file that is shipped as-is (fonts, ...), without the compiled `_c` suffix.
     pub fn read_raw(&self, virtual_path: &str) -> Option<Vec<u8>> {
         let rel = virtual_path.trim_start_matches('/');
-        self.roots.iter().find_map(|r| std::fs::read(r.join(rel)).ok())
+        self.roots.iter().find_map(|r| std::fs::read(r.join(rel)).ok()).or_else(|| self.packages.iter().find_map(|p| p.read(rel)))
     }
 
     pub fn read(&self, virtual_path: &str) -> Option<Vec<u8>> {
         let rel = virtual_path.trim_start_matches('/');
         let compiled = if rel.ends_with("_c") { rel.to_string() } else { format!("{rel}_c") };
-        self.roots.iter().find_map(|r| std::fs::read(r.join(&compiled)).ok())
+        self.roots.iter().find_map(|r| std::fs::read(r.join(&compiled)).ok()).or_else(|| self.packages.iter().find_map(|p| p.read(&compiled)))
     }
 }
 

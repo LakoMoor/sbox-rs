@@ -11,6 +11,7 @@ pub mod vbib;
 pub mod vmat;
 pub mod sound_event;
 pub mod vsnd;
+pub mod vpk;
 pub mod vtex;
 pub mod weightlist;
 

@@ -21,7 +21,7 @@ Conventions follow s&box: X forward, Y left, Z up; angles are pitch/yaw/roll in 
 | `sbox-math` | `Sandbox.System/Math` | Vec/Quat (glam), `Angles`, `Transform`, `BBox`, `Ray`, `Plane` |
 | `sbox-scene` | `Sandbox.Engine/Scene` | `Scene` / `GameObject` / `Component`, s&box lifecycle order, hierarchy, deferred destroy, fixed update, systems/resources, `.scene`/`.prefab` JSON loading |
 | `sbox-physics` | Havok wrapper in the closed core | rapier-based `Rigidbody`, box/sphere/plane colliders, parent-body compound colliders, fixed-step system |
-| `sbox-resource` | closed Source 2 native core | `*_c` container, binary KV3, `vtex_c` textures (BC1-7, LZ4/ZSTD mips, PNG), VBIB vertex/index buffers (meshopt), `vmdl_c` models (multi-mesh, skeleton, skin weights), `vmat_c` materials, `anim_c` animations, `vanmgrph_c` animation graphs, `sound_c` sound events, `vsnd_c` sounds (PCM16 / MP3 / Ogg Vorbis / Opus, 739 / 739 shipped files), `skel_c`, virtual file resolver |
+| `sbox-resource` | closed Source 2 native core | `*_c` container, binary KV3, `vtex_c` textures (BC1-7, LZ4/ZSTD mips, PNG), VBIB vertex/index buffers (meshopt), `vmdl_c` models (multi-mesh, skeleton, skin weights), `vmat_c` materials, `anim_c` animations, `vanmgrph_c` animation graphs, `sound_c` sound events, `vsnd_c` sounds (PCM16 / MP3 / Ogg Vorbis / Opus, 739 / 739 shipped files), `skel_c`, `.vpk` v2 packages, virtual file resolver |
 | `sbox-render` | closed Source 2 native core | wgpu renderer: meshes, GPU skinning, materials with BC textures, directional + point lights, 2048² directional shadow map with PCF, BC6H HDR cubemap sky, ACES tone mapping, normal maps (derivative TBN), GGX specular with RMA / metalness, off-screen rendering |
 | `sbox-app` | `Launcher` | demo window / model viewer / screenshot tool, audio playback (rodio) |
 
@@ -41,7 +41,7 @@ Checked on the `game/` directory produced by the official `Setup` step:
 
 - Animation graphs are evaluated in a reduced form (poses are computed per node: sequence, blend, 2D blend, selector, state machines with parameter/time/tag conditions, `Subtract` / `Add` additive layers; the additive convention `base * delta` is unverified against the real engine); bone-mask nodes blend per bone using the citizen weight lists read from the model source `.vmdl_prefab` (parent blend space only; the model-space variants are treated the same), IK, look-at / aim, root motion and in-model (`ANIM` block) animations are not
 - `.shader_c` shaders are compiled GPU bytecode and are not translated: materials use one fixed PBR shader, with the common `F_*` flags mapped (`F_ALPHA_TEST`, `F_TRANSLUCENT`, `F_UNLIT`); backface rendering, self-illumination, detail textures, multiblend and tint masks are ignored
-- VPK, audio (`vsnd_c`), input system, networking, UI
+- Input system beyond the basic controller, networking, UI
 - Prefab instances/variables, most scene component types (only models, lights, camera, rigidbody and colliders are mapped)
 - Scripting: s&box game code is C#; it needs either a Rust API or an embedded .NET runtime
 
@@ -99,7 +99,7 @@ cargo run --release -p sbox-resource --example survey -- path/to/game
 
 1. Animation graphs, additive clips, root motion; clothing (`clothing_c`) and mesh groups
 2. Real shader translation (`vmesh_c` references done)
-3. VPK and a proper virtual file system
+3. ~~VPK~~ (v2 reader and `GameFs::add_vpk` done; no automatic mounting of map packages yet)
 4. Scene / prefab loading (`*.scene`, `*.prefab`)
 5. Input + character controller, audio, networking, UI
 6. Scripting story for game code
