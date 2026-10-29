@@ -2,6 +2,7 @@
 //! Format knowledge is derived from inspecting the shipped files.
 
 pub mod anim;
+pub mod animgraph;
 pub mod container;
 pub mod kv3;
 pub mod mesh;

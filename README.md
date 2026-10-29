@@ -37,7 +37,7 @@ Checked on the `game/` directory produced by the official `Setup` step:
 
 ### Not done yet
 
-- Animation blending / state graphs (`vanmgrph`), root motion, additive clips, in-model (`ANIM` block) animations
+- Animation graphs are evaluated in a reduced form (sequence, blend, 2D blend, selector, state machines with parameter/time/tag conditions); additive layers, bone masks, IK, look-at / aim, root motion and in-model (`ANIM` block) animations are not
 - External `vmesh_c` references, `.shader_c` shaders (materials are approximated by a fixed PBR shader)
 - VPK, audio (`vsnd_c`), input system, networking, UI
 - Prefab instances/variables, most scene component types (only models, lights, camera, rigidbody and colliders are mapped)
@@ -52,6 +52,8 @@ cargo run -p sbox-app --release
 ```
 
 Controls: WASD / QE to move, arrow keys to look, Esc to quit.
+
+Drive the citizen with its animation graph: `sbox-app citizen.vmdl_c --graph citizen.vanmgrph_c --param move_x=150 --param wish_groundspeed=150 --param move_groundspeed=150`.
 
 Pass `--play` with `--scene` to replace the fly camera with a physics-driven first-person capsule controller (WASD, Shift to run, Space to jump, click to capture the mouse).
 
