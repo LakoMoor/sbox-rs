@@ -107,7 +107,7 @@ impl GraphAnimator {
             .unwrap_or_default();
         let clip_index = fs.index("anim");
 let mut me = Self { graph, instance, fs, skeleton, anim_skel: None, parts, clips: Default::default(), weight_lists, clip_index, skels: Default::default(), main_skel: None };
-        me.clip("WalkFast_N"); // fixes the main skeleton to the locomotion one
+        me.clip("IdlePose_Default"); // human.skel (with eye bones) is a superset of citizen_human.skel
         me
     }
 
@@ -148,33 +148,14 @@ let mut me = Self { graph, instance, fs, skeleton, anim_skel: None, parts, clips
         if self.main_skel.as_deref() == Some(skel_path.as_str()) || self.main_skel.is_none() {
             return Some((pose, additive));
         }
-        // Sibling skeleton (`human.skel` vs `citizen_human.skel`): remap by bone name; bones the clip lacks keep the
-        // model bind pose. Facial clips are skipped: their bones are posed in another convention and displace the ears and eyes.
-        if name.starts_with("Expressions") || name.starts_with("Eyes_") {
-            return None;
-        }
+        // `citizen_human.skel` lacks the two eye bones of `human.skel`: remap by bone name, missing bones keep the bind pose.
         let (main, own) = (self.anim_skel.as_ref()?, self.skels.get(&skel_path)?);
         let own_idx: std::collections::HashMap<&str, usize> = own.names.iter().enumerate().map(|(i, n)| (n.as_str(), i)).collect();
         let model_idx: std::collections::HashMap<&str, usize> = self.skeleton.names.iter().enumerate().map(|(i, n)| (n.as_str(), i)).collect();
-        // Bones below the head keep the bind pose (the face rig differs between the two skeletons).
-        let head = main.names.iter().position(|n| n == "head");
-        let under_head = |mut i: usize| {
-            while let Some(&p) = main.parents.get(i) {
-                if p < 0 {
-                    return false;
-                }
-                i = p as usize;
-                if Some(i) == head {
-                    return true;
-                }
-            }
-            false
-        };
         let remapped = main
             .names
             .iter()
-            .enumerate()
-            .map(|(bi, n)| match own_idx.get(n.as_str()).and_then(|&i| pose.get(i)).filter(|_| !under_head(bi)) {
+            .map(|n| match own_idx.get(n.as_str()).and_then(|&i| pose.get(i)) {
                 Some(p) => *p,
                 None => {
                     let b = model_idx.get(n.as_str());
