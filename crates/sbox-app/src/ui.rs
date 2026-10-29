@@ -43,6 +43,9 @@ pub struct TextField {
     pub anchor: Option<usize>,
     /// Pixel offset of `anchor`, measured like `caret_x`.
     pub anchor_x: f32,
+    /// Pixel offset of every caret position (`chars + 1` entries, the first is 0), measured by the app when the text
+    /// changes; used to place the caret from a mouse position.
+    pub offsets: Vec<f32>,
 }
 
 /// Caret movement keys.
@@ -103,8 +106,8 @@ impl Ui {
     pub fn focus_at(&mut self, x: f32, y: f32) -> bool {
         self.focus = self.fields.iter().rposition(|f| contains(&f.rect, x, y));
         if let Some(i) = self.focus {
-            // The caret starts at the end of the text; `dirty` makes the app measure its offset.
-            self.fields[i].caret = self.fields[i].text.chars().count();
+            // The caret lands under the click; `dirty` makes the app measure its pixel offset.
+            self.fields[i].caret = Self::index_at(&self.fields[i], x);
             self.fields[i].anchor = None;
             self.dirty.push(i);
         }
@@ -117,6 +120,38 @@ impl Ui {
 
     pub fn focused(&self) -> Option<&TextField> {
         self.focus.map(|i| &self.fields[i])
+    }
+
+    /// Caret position (character index) nearest to the screen x coordinate. Without measured offsets: the end.
+    fn index_at(f: &TextField, x: f32) -> usize {
+        let len = f.text.chars().count();
+        if f.offsets.len() != len + 1 {
+            return len;
+        }
+        let local = x - f.rect[0] - 8.0;
+        (0..=len).min_by(|&a, &b| (f.offsets[a] - local).abs().total_cmp(&(f.offsets[b] - local).abs())).unwrap_or(len)
+    }
+
+    /// Mouse drag in the focused field: the selection runs from where the press landed to the pointer.
+    pub fn drag_to(&mut self, x: f32) -> bool {
+        let Some(i) = self.focus else { return false };
+        let f = &mut self.fields[i];
+        let idx = Self::index_at(f, x);
+        f.anchor.get_or_insert(f.caret);
+        f.caret = idx;
+        self.dirty.push(i);
+        true
+    }
+
+    /// Insert pasted text at the caret (replacing the selection), newlines dropped.
+    pub fn paste(&mut self, text: &str) -> bool {
+        if self.focus.is_none() {
+            return false;
+        }
+        for c in text.chars().filter(|c| !c.is_control()) {
+            self.type_char(c);
+        }
+        true
     }
 
     /// Scroll by `dy` pixels (positive = content moves up), clamped to the content.
@@ -330,7 +365,7 @@ mod tests {
     }
 
     fn field(id: &str, rect: [f32; 4]) -> TextField {
-        TextField { id: id.into(), rect, text: String::new(), max_len: 5, color: [0.1; 4], focus_color: [0.3; 4], label: None, caret: 0, caret_x: 0.0, anchor: None, anchor_x: 0.0 }
+        TextField { id: id.into(), rect, text: String::new(), max_len: 5, color: [0.1; 4], focus_color: [0.3; 4], label: None, caret: 0, caret_x: 0.0, anchor: None, anchor_x: 0.0, offsets: vec![] }
     }
 
     #[test]
@@ -453,6 +488,45 @@ mod tests {
         // Content that fits does not scroll.
         ui.content_height = 100.0;
         assert!(!ui.scroll_by(10.0));
+    }
+
+    #[test]
+    fn click_places_the_caret_and_drag_selects() {
+        let mut ui = Ui::new(TextureId(0));
+        let mut f = field("a", [100.0, 0.0, 200.0, 30.0]);
+        f.max_len = 10;
+        f.text = "abcd".into();
+        // 10 px per character, starting 8 px inside the field.
+        f.offsets = vec![0.0, 10.0, 20.0, 30.0, 40.0];
+        ui.fields.push(f);
+        ui.focus_at(100.0 + 8.0 + 21.0, 5.0);
+        assert_eq!(ui.fields[0].caret, 2, "nearest boundary to 21 px is 20");
+        ui.drag_to(100.0 + 8.0 + 39.0);
+        assert_eq!((ui.fields[0].anchor, ui.fields[0].caret), (Some(2), 4));
+        assert_eq!(ui.selected_text().as_deref(), Some("cd"));
+        ui.drag_to(100.0);
+        assert_eq!(ui.selected_text().as_deref(), Some("ab"), "dragging back past the start");
+        // Clicking left of the text puts the caret at the start; stale offsets fall back to the end.
+        ui.focus_at(101.0, 5.0);
+        assert_eq!(ui.fields[0].caret, 0);
+        ui.fields[0].text.push('e');
+        ui.focus_at(101.0, 5.0);
+        assert_eq!(ui.fields[0].caret, 5, "offsets no longer match the text");
+    }
+
+    #[test]
+    fn paste_replaces_the_selection_and_drops_newlines() {
+        let mut ui = Ui::new(TextureId(0));
+        let mut f = field("a", [0.0, 0.0, 100.0, 30.0]);
+        f.max_len = 20;
+        ui.fields.push(f);
+        assert!(!ui.paste("x"), "no focus");
+        ui.focus_at(5.0, 5.0);
+        ui.paste("hello\nworld");
+        assert_eq!(ui.fields[0].text, "helloworld");
+        ui.select_all();
+        ui.paste("ok");
+        assert_eq!(ui.fields[0].text, "ok");
     }
 
     #[test]

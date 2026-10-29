@@ -22,3 +22,4 @@ rodio = "0.19"
 ab_glyph = "0.2"
 base64 = "0.22"
 flate2 = "1"
+arboard = { version = "3", default-features = false }

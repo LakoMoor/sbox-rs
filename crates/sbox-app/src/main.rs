@@ -104,6 +104,9 @@ struct App {
     net: Option<Net>,
     mods: winit::keyboard::ModifiersState,
     player_mesh: Option<sbox_scene::MeshId>,
+    clipboard: Option<arboard::Clipboard>,
+    /// A left-button press started in a text field and has not been released.
+    dragging: bool,
 }
 
 /// `--host <addr>` serves the physics props to clients; `--join <addr>` mirrors a server's props.
@@ -253,6 +256,7 @@ impl App {
                 caret_x: 0.0,
                 anchor: None,
                 anchor_x: 0.0,
+                offsets: vec![0.0],
             });
         }
         Some((ui, font))
@@ -356,15 +360,15 @@ impl App {
         for i in ui.take_dirty() {
             let text = ui.fields[i].text.clone();
             ui.fields[i].label = (!text.is_empty()).then(|| Self::text_texture(r, font, &text, 24.0));
-            let prefix: String = text.chars().take(ui.fields[i].caret).collect();
-            ui.fields[i].caret_x = if prefix.is_empty() { 0.0 } else { Self::text_texture_width(font, &prefix, 24.0) };
-            ui.fields[i].anchor_x = match ui.fields[i].anchor {
-                Some(a) => {
-                    let p: String = text.chars().take(a).collect();
-                    if p.is_empty() { 0.0 } else { Self::text_texture_width(font, &p, 24.0) }
-                }
-                None => 0.0,
-            };
+            // Pixel offset of every caret position, so mouse clicks can place the caret and the selection can be drawn.
+            let chars: Vec<char> = text.chars().collect();
+            let offsets: Vec<f32> = (0..=chars.len())
+                .map(|n| if n == 0 { 0.0 } else { Self::text_texture_width(font, &chars[..n].iter().collect::<String>(), 24.0) })
+                .collect();
+            let f = &mut ui.fields[i];
+            f.caret_x = offsets[f.caret.min(chars.len())];
+            f.anchor_x = f.anchor.map_or(0.0, |a| offsets[a.min(chars.len())]);
+            f.offsets = offsets;
         }
         r.overlay = ui.rects();
     }
@@ -581,7 +585,12 @@ impl ApplicationHandler for App {
             WindowEvent::ModifiersChanged(m) => self.mods = m.state(),
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = (position.x as f32, position.y as f32);
-                if let (Some(ui), Some(r)) = (&mut self.ui, &mut self.renderer) {
+                if self.dragging {
+                    if let Some(ui) = &mut self.ui {
+                        ui.drag_to(self.cursor.0);
+                    }
+                    self.refresh_ui();
+                } else if let (Some(ui), Some(r)) = (&mut self.ui, &mut self.renderer) {
                     ui.set_mouse(self.cursor.0, self.cursor.1);
                     r.overlay = ui.rects();
                 }
@@ -620,6 +629,19 @@ impl ApplicationHandler for App {
                         }
                         winit::keyboard::Key::Character(c) if self.mods.control_key() && c.eq_ignore_ascii_case("a") => {
                             ui.select_all();
+                        }
+                        winit::keyboard::Key::Character(c) if self.mods.control_key() && (c.eq_ignore_ascii_case("c") || c.eq_ignore_ascii_case("x")) => {
+                            if let (Some(text), Some(cb)) = (ui.selected_text(), &mut self.clipboard) {
+                                let _ = cb.set_text(text);
+                                if c.eq_ignore_ascii_case("x") {
+                                    ui.backspace();
+                                }
+                            }
+                        }
+                        winit::keyboard::Key::Character(c) if self.mods.control_key() && c.eq_ignore_ascii_case("v") => {
+                            if let Some(text) = self.clipboard.as_mut().and_then(|cb| cb.get_text().ok()) {
+                                ui.paste(&text);
+                            }
                         }
                         _ if self.mods.control_key() => {}
                         _ => {
@@ -689,6 +711,9 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::MouseInput { state, button, .. } if button != MouseButton::Left || state == ElementState::Released => {
+                if button == MouseButton::Left {
+                    self.dragging = false;
+                }
                 let action = match button {
                     MouseButton::Left => Some("Attack1"),
                     MouseButton::Right => Some("Attack2"),
@@ -701,7 +726,7 @@ impl ApplicationHandler for App {
             }
             WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
                 if let Some(ui) = &mut self.ui {
-                    ui.focus_at(self.cursor.0, self.cursor.1);
+                    self.dragging = ui.focus_at(self.cursor.0, self.cursor.1);
                 }
                 self.refresh_ui();
                 if let Some(id) = self.ui.as_ref().and_then(|ui| ui.click(self.cursor.0, self.cursor.1)) {
@@ -748,7 +773,7 @@ fn main() -> anyhow::Result<()> {
     env_logger::init();
     let el = EventLoop::new()?;
     el.set_control_flow(ControlFlow::Poll);
-    let mut app = App { window: None, renderer: None, scene: Scene::new(), camera: None, last: Instant::now(), audio: None, ui: None, ui_font: None, cursor: (0.0, 0.0), net: None, mods: Default::default(), player_mesh: None };
+    let mut app = App { window: None, renderer: None, scene: Scene::new(), camera: None, last: Instant::now(), audio: None, ui: None, ui_font: None, cursor: (0.0, 0.0), net: None, mods: Default::default(), player_mesh: None, clipboard: arboard::Clipboard::new().ok(), dragging: false };
     el.run_app(&mut app)?;
     Ok(())
 }
