@@ -84,6 +84,7 @@ pub struct GraphAnimator {
     pub anim_skel: Option<sbox_resource::model::AnimSkeleton>,
     pub parts: Vec<sbox_scene::GoId>,
     clips: std::collections::HashMap<String, Option<sbox_resource::anim::Animation>>,
+    weight_lists: std::collections::HashMap<String, sbox_resource::weightlist::WeightList>,
 }
 
 impl GraphAnimator {
@@ -94,7 +95,13 @@ impl GraphAnimator {
         parts: Vec<sbox_scene::GoId>,
     ) -> Self {
         let instance = sbox_resource::animgraph::Instance::new(&graph);
-        Self { graph, instance, fs, skeleton, anim_skel: None, parts, clips: Default::default() }
+        // Weight lists live in the model source next to the graph; only the citizen ships one.
+        let weight_lists = fs
+            .read_raw("models/citizen/prefabs/citizen_weightlistlist.vmdl_prefab")
+            .and_then(|b| String::from_utf8(b).ok())
+            .map(|t| sbox_resource::weightlist::parse(&t))
+            .unwrap_or_default();
+        Self { graph, instance, fs, skeleton, anim_skel: None, parts, clips: Default::default(), weight_lists }
     }
 
     fn clip(&mut self, name: &str) -> Option<&sbox_resource::anim::Animation> {
@@ -126,7 +133,12 @@ impl Component for GraphAnimator {
             let this = std::cell::RefCell::new(&mut *self);
             let mut sample = |n: &str, t: f32| this.borrow_mut().clip(n).map(|a| (a.sample(t), a.additive));
             let mut len = |n: &str| this.borrow_mut().clip(n).map_or(1.0, |a| a.duration);
-            let pose = inst.evaluate_pose(&graph, scene.delta, &mut sbox_resource::animgraph::Clips { sample: &mut sample, len: &mut len });
+            let mut weights = |name: &str| {
+                let me = this.borrow();
+                let skel = me.anim_skel.as_ref()?;
+                me.weight_lists.get(name).map(|wl| wl.per_bone(&skel.names))
+            };
+            let pose = inst.evaluate_pose(&graph, scene.delta, &mut sbox_resource::animgraph::Clips { sample: &mut sample, len: &mut len, weights: &mut weights });
             drop(this);
             self.graph = graph;
             self.instance = inst;

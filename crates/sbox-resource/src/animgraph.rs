@@ -48,6 +48,8 @@ pub enum Node {
     Pass { child: Option<i64> },
     /// Base pose with an additive (delta) pose applied on top.
     Add { base: Option<i64>, additive: Option<i64> },
+    /// Blend `overlay` over `base` per bone using a named weight list (scaled by `param`, 1 when absent).
+    BoneMask { base: Option<i64>, overlay: Option<i64>, list: String, param: Option<i64> },
     /// Generates an additive delta: `base - subtract`.
     Subtract { base: Option<i64>, subtract: Option<i64> },
 }
@@ -169,7 +171,13 @@ fn parse_node(v: &Value) -> Option<Node> {
         // Layering / modifier nodes: follow the base input.
         "CAddAnimNode" => Node::Add { base: conn(v, "m_baseInput"), additive: conn(v, "m_additiveInput") },
         "CSubtractAnimNode" => Node::Subtract { base: conn(v, "m_baseInputConnection"), subtract: conn(v, "m_subtractInputConnection") },
-        "CRootAnimNode" | "CBoneMaskAnimNode" | "CLookAtAnimNode" | "CAimMatrixAnimNode"
+        "CBoneMaskAnimNode" => Node::BoneMask {
+            base: conn(v, "m_inputConnection1"),
+            overlay: conn(v, "m_inputConnection2"),
+            list: v.get("m_weightListName").and_then(Value::as_str).unwrap_or("").to_string(),
+            param: id_of(v.get("m_blendParameter")).filter(|id| *id != 0xFFFF_FFFF),
+        },
+        "CRootAnimNode" | "CLookAtAnimNode" | "CAimMatrixAnimNode"
         | "CTwoBoneIKAnimNode" | "CSolveIKChainAnimNode" | "CSpeedScaleAnimNode" | "CHitReactAnimNode" | "CCycleControlAnimNode"
         | "CChoreoAnimNode" | "CDirectPlaybackAnimNode" => Node::Pass { child: PASS_KEYS.iter().find_map(|k| conn(v, k)) },
         _ => return None,
@@ -287,7 +295,7 @@ impl Instance {
         let Some(node) = g.nodes.get(&id) else { return };
         match node {
             Node::Sequence { name, speed, .. } => out.push(Sample { sequence: name.clone(), weight: w, time: t * speed }),
-            Node::Pass { child } | Node::Add { base: child, .. } | Node::Subtract { base: child, .. } => {
+            Node::Pass { child } | Node::Add { base: child, .. } | Node::Subtract { base: child, .. } | Node::BoneMask { base: child, .. } => {
                 if let Some(c) = child {
                     self.eval(g, *c, w, t, dt, len, out, depth + 1);
                 }
@@ -400,6 +408,8 @@ pub struct Clips<'a> {
     /// Pose of a sequence at a time in seconds, plus whether the clip is additive.
     pub sample: &'a mut dyn FnMut(&str, f32) -> Option<(Vec<BonePose>, bool)>,
     pub len: &'a mut dyn FnMut(&str) -> f32,
+    /// Per-bone weights (pose order) of a named weight list, if known.
+    pub weights: &'a mut dyn FnMut(&str) -> Option<Vec<f32>>,
 }
 
 fn qmul(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
@@ -440,13 +450,28 @@ pub fn apply_additive(base: &mut [BonePose], delta: &[BonePose], weight: f32) {
     }
 }
 
+/// Per-bone blend: bone `i` is `base` mixed towards `overlay` by `weights[i] * k`.
+pub fn mask_blend(base: &[BonePose], overlay: &[BonePose], weights: &[f32], k: f32) -> Vec<BonePose> {
+    base.iter()
+        .zip(overlay)
+        .enumerate()
+        .map(|(i, (b, o))| {
+            let w = (weights.get(i).copied().unwrap_or(0.0) * k).clamp(0.0, 1.0);
+            if w <= 0.0 {
+                return *b;
+            }
+            blend_poses(&[(vec![*b], 1.0 - w), (vec![*o], w)])[0]
+        })
+        .collect()
+}
+
 fn first_sequence(g: &Graph, id: i64, depth: u32) -> Option<String> {
     if depth > 128 {
         return None;
     }
     match g.nodes.get(&id)? {
         Node::Sequence { name, .. } => Some(name.clone()),
-        Node::Pass { child } | Node::Add { base: child, .. } | Node::Subtract { base: child, .. } => first_sequence(g, (*child)?, depth + 1),
+        Node::Pass { child } | Node::Add { base: child, .. } | Node::Subtract { base: child, .. } | Node::BoneMask { base: child, .. } => first_sequence(g, (*child)?, depth + 1),
         Node::First { children } | Node::Select { children, .. } => first_sequence(g, *children.first()?, depth + 1),
         Node::Blend { children, .. } => first_sequence(g, children.first()?.0, depth + 1),
         Node::Blend2D { items, .. } => items.first().map(|i| i.0.clone()),
@@ -476,6 +501,13 @@ impl Instance {
                 let i = param.and_then(|p| self.params.get(&p).copied()).unwrap_or(0.0).max(0.0) as usize;
                 let c = *children.get(i.min(children.len().saturating_sub(1)))?;
                 self.pose(g, c, t, dt, clips, depth + 1)
+            }
+            Node::BoneMask { base, overlay, list, param } => {
+                let b = self.pose(g, (*base)?, t, dt, clips, depth + 1)?;
+                let Some(w) = (clips.weights)(list) else { return Some(b) };
+                let Some(o) = overlay.and_then(|o| self.pose(g, o, t, dt, clips, depth + 1)) else { return Some(b) };
+                let k = param.map_or(1.0, |p| self.params.get(&p).copied().unwrap_or(0.0) as f32);
+                Some(Pose { additive: b.additive, bones: mask_blend(&b.bones, &o.bones, &w, k) })
             }
             Node::Add { base, additive } => {
                 let mut b = self.pose(g, (*base)?, t, dt, clips, depth + 1)?;
@@ -621,7 +653,7 @@ mod tests {
                 let Some(i) = id else { println!("chain ended (no child id)"); break };
                 let Some(n) = g.nodes.get(&i) else { println!("chain {i}: node missing/unparsed"); break };
                 let d = match n {
-                    Node::Pass { child } | Node::Add { base: child, .. } | Node::Subtract { base: child, .. } => format!("Pass {child:?}"),
+                    Node::Pass { child } | Node::Add { base: child, .. } | Node::Subtract { base: child, .. } | Node::BoneMask { base: child, .. } => format!("Pass {child:?}"),
                     Node::First { children } | Node::Select { children, .. } => format!("First {children:?}"),
                     Node::Blend2D { items, .. } => format!("Blend2D {}", items.len()),
                     Node::Blend { children, .. } => format!("Blend {children:?}"),
@@ -630,7 +662,7 @@ mod tests {
                 };
                 println!("chain {i}: {d}");
                 id = match n {
-                    Node::Pass { child } | Node::Add { base: child, .. } | Node::Subtract { base: child, .. } => *child,
+                    Node::Pass { child } | Node::Add { base: child, .. } | Node::Subtract { base: child, .. } | Node::BoneMask { base: child, .. } => *child,
                     Node::First { children } | Node::Select { children, .. } => children.first().copied(),
                     Node::Blend { children, .. } => children.first().map(|c| c.0),
                     Node::StateMachine { states } => states.iter().find(|s| s.start).and_then(|s| s.input),
@@ -673,10 +705,24 @@ mod tests {
         let mut len = |_: &str| 1.0;
         let mut pose = None;
         for _ in 0..10 {
-            pose = inst.evaluate_pose(&g, 1.0 / 30.0, &mut Clips { sample: &mut sample, len: &mut len });
+            let mut weights = |_: &str| None;
+            pose = inst.evaluate_pose(&g, 1.0 / 30.0, &mut Clips { sample: &mut sample, len: &mut len, weights: &mut weights });
         }
         assert!(pose.is_some(), "default parameters should produce a pose");
         assert!(requested.iter().any(|n| n == "IdlePose_Default"), "{requested:?}");
+    }
+
+    #[test]
+    fn mask_blend_respects_weights() {
+        let id = [0.0, 0.0, 0.0, 1.0];
+        let base = vec![BonePose { position: [0.0; 3], rotation: id, scale: 1.0 }; 3];
+        let over = vec![BonePose { position: [10.0, 0.0, 0.0], rotation: id, scale: 1.0 }; 3];
+        let r = mask_blend(&base, &over, &[0.0, 0.5, 1.0], 1.0);
+        assert_eq!(r[0].position[0], 0.0);
+        assert!((r[1].position[0] - 5.0).abs() < 1e-5);
+        assert!((r[2].position[0] - 10.0).abs() < 1e-5);
+        let half = mask_blend(&base, &over, &[1.0, 1.0, 1.0], 0.5);
+        assert!((half[0].position[0] - 5.0).abs() < 1e-5);
     }
 
     #[test]

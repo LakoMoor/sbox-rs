@@ -12,6 +12,7 @@ pub mod vmat;
 pub mod sound_event;
 pub mod vsnd;
 pub mod vtex;
+pub mod weightlist;
 
 pub use container::{Block, Resource};
 pub use kv3::Value;
