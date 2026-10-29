@@ -34,3 +34,31 @@ impl Component for CubeController {
     }
     impl_component_any!();
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cube_controller_moves_and_yaws() {
+        let mut scene = Scene::new();
+        scene.insert_resource(Input::default());
+        let go = scene.create_object("cube");
+        scene.add_component(go, CubeController::default());
+        {
+            let i = scene.resource_mut::<Input>().unwrap();
+            i.set("Forward", true);
+            i.mouse_captured = true;
+            i.add_mouse(-900.0, 0.0); // -dx * 0.1 = +90 deg yaw
+        }
+        scene.tick(1.0 / 60.0); // first tick: on_start
+        for _ in 0..60 {
+            scene.tick(1.0 / 60.0);
+        }
+        let t = scene.world_transform(go);
+        let yaw = t.rotation.angles().yaw;
+        assert!((yaw - 90.0).abs() < 1.0, "yaw={yaw}");
+        // after the 90 degree turn, forward is +Y: ~100 units in ~1s
+        assert!(t.position.y > 80.0 && t.position.x.abs() < 5.0, "pos={:?}", t.position);
+    }
+}
