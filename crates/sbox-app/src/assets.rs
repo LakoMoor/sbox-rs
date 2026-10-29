@@ -222,6 +222,21 @@ impl ComponentLoader for SceneLoader<'_> {
                 }
                 true
             }
+            "SoundPointComponent" => {
+                let Some(ev_path) = p.get("SoundEvent").and_then(Value::as_str) else { return true };
+                let Some(fs) = self.assets.fs.as_ref() else { return true };
+                let Some(ev) = fs.read(ev_path).and_then(|d| sbox_resource::sound_event::parse(&d).ok()) else {
+                    log::warn!("sound event not found: {ev_path}");
+                    return true;
+                };
+                let Some(file) = ev.sounds.first().and_then(|s| fs.read(s)) else { return true };
+                let looping = p.get("MinRepeatTime").and_then(Value::as_f64).map_or(false, |t| t <= 0.0);
+                let vol = p.get("Volume").and_then(Value::as_f64).unwrap_or(1.0) as f32;
+                if p.get("PlayOnStart").and_then(Value::as_bool).unwrap_or(true) {
+                    scene.add_component(go, crate::game::SoundPoint::new(ev, file, looping, vol));
+                }
+                true
+            }
             "CubeController" => {
                 let speed = p.get("MoveSpeed").and_then(Value::as_f64).unwrap_or(100.0) as f32;
                 scene.add_component(go, crate::game::CubeController { move_speed: speed });

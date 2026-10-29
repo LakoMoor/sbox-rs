@@ -276,6 +276,12 @@ impl ApplicationHandler for App {
             el.exit();
             return;
         }
+        if args.iter().any(|a| a == "--audio") && args.iter().all(|a| a != "--screenshot") {
+            self.audio = audio::Audio::new();
+            if let Some(a) = &self.audio {
+                self.scene.insert_resource(a.handle());
+            }
+        }
         if let Some(i) = args.iter().position(|a| a == "--sound") {
             let path = args.get(i + 1).expect("--sound <file.vsnd_c>");
             self.audio = audio::Audio::new();

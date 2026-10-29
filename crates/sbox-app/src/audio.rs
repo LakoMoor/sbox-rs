@@ -4,6 +4,25 @@ use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink};
 use sbox_resource::vsnd;
 use std::io::Cursor;
 
+/// Cloneable output handle, stored as a scene resource so components can start sounds.
+#[derive(Clone)]
+pub struct AudioHandle(pub OutputStreamHandle);
+
+/// Decode a `vsnd_c` and start it on its own sink (volume 0 until the caller sets it).
+pub fn start(handle: &OutputStreamHandle, file: &[u8], looping: bool) -> Option<Sink> {
+    let sound = vsnd::parse(file).ok()?;
+    let dec = Decoder::new(Cursor::new(sound.to_file_bytes()?)).ok()?;
+    let sink = Sink::try_new(handle).ok()?;
+    sink.set_volume(0.0);
+    if looping {
+        use rodio::Source;
+        sink.append(dec.repeat_infinite());
+    } else {
+        sink.append(dec);
+    }
+    Some(sink)
+}
+
 pub struct Audio {
     _stream: OutputStream,
     handle: OutputStreamHandle,
@@ -48,6 +67,10 @@ impl Audio {
         self.sinks.retain(|s| !s.empty());
         self.sinks.push(sink);
         true
+    }
+
+    pub fn handle(&self) -> AudioHandle {
+        AudioHandle(self.handle.clone())
     }
 
     pub fn is_playing(&self) -> bool {

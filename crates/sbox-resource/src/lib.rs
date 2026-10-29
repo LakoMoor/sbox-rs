@@ -9,6 +9,7 @@ pub mod mesh;
 pub mod model;
 pub mod vbib;
 pub mod vmat;
+pub mod sound_event;
 pub mod vsnd;
 pub mod vtex;
 

@@ -11,3 +11,4 @@ meshopt = "0.7"
 anyhow.workspace = true
 glam.workspace = true
 opus-decoder = "0.1.1"
+serde_json = "1.0.154"

@@ -1,7 +1,7 @@
 //! Rust ports of game-side C# components (the scripting strategy: game code is reimplemented against the Rust scene API).
 
 use sbox_math::{Angles, RotationExt, Vec3};
-use sbox_scene::{impl_component_any, Component, Handle, Input, Scene};
+use sbox_scene::{impl_component_any, CameraComponent, Component, Handle, Input, Scene};
 
 /// Port of `samples/sweeper/code/CubeController.cs`.
 pub struct CubeController {
@@ -38,6 +38,17 @@ impl Component for CubeController {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sound_point_without_audio_device_is_harmless() {
+        let ev = sbox_resource::sound_event::SoundEvent { sounds: vec![], volume: 1.0, pitch: 1.0, min_distance: 10.0, max_distance: 100.0, ui: false };
+        let mut scene = Scene::new();
+        let go = scene.create_object("s");
+        scene.add_component(go, SoundPoint::new(ev, Vec::new(), false, 1.0));
+        for _ in 0..3 {
+            scene.tick(1.0 / 60.0);
+        }
+    }
 
     #[test]
     fn cube_controller_moves_and_yaws() {
@@ -138,6 +149,37 @@ impl Component for GraphAnimator {
                 m.bones = mats.clone();
             }
         }
+    }
+    impl_component_any!();
+}
+
+/// `Sandbox.SoundPointComponent`: plays a sound event at the object's position, attenuated by distance to the camera.
+pub struct SoundPoint {
+    pub event: sbox_resource::sound_event::SoundEvent,
+    pub sound_file: Vec<u8>,
+    pub looping: bool,
+    pub volume: f32,
+    sink: Option<rodio::Sink>,
+}
+
+impl SoundPoint {
+    pub fn new(event: sbox_resource::sound_event::SoundEvent, sound_file: Vec<u8>, looping: bool, volume: f32) -> Self {
+        Self { event, sound_file, looping, volume, sink: None }
+    }
+}
+
+impl Component for SoundPoint {
+    fn on_start(&mut self, scene: &mut Scene, _h: Handle) {
+        if let Some(h) = scene.resource::<crate::audio::AudioHandle>() {
+            self.sink = crate::audio::start(&h.0, &self.sound_file, self.looping);
+        }
+    }
+    fn on_update(&mut self, scene: &mut Scene, h: Handle) {
+        let Some(sink) = &self.sink else { return };
+        let pos = scene.world_transform(h.go).position;
+        let listener = scene.iter_components::<CameraComponent>().next().map(|(go, _)| scene.world_transform(go).position);
+        let gain = listener.map_or(1.0, |l| self.event.attenuation(l.distance(pos)));
+        sink.set_volume(self.volume * self.event.volume * gain);
     }
     impl_component_any!();
 }
