@@ -84,7 +84,7 @@ impl Vpk {
 
     /// Contents of the entry at `path` (case-insensitive, forward slashes).
     pub fn read(&self, path: &str) -> Option<Vec<u8>> {
-        let e = self.entries.get(&path.trim_start_matches('/').to_lowercase())?;
+        let e = self.entries.get(&path.replace('\\', "/").trim_start_matches('/').to_lowercase())?;
         let mut out = e.preload.clone();
         if e.length > 0 {
             let (off, len) = (e.offset as usize, e.length as usize);

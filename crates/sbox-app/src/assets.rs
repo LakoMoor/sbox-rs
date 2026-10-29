@@ -1,6 +1,6 @@
 //! Asset cache and the scene-file component registry.
 
-use sbox_math::Vec3;
+use sbox_math::{Transform, Vec3};
 use sbox_physics::{Collider, Rigidbody, Shape};
 use sbox_scene::parse_vec3;
 use sbox_render::{MaterialDesc, MeshData, Renderer};
@@ -343,5 +343,73 @@ impl ComponentLoader for SceneLoader<'_> {
             }
             _ => false,
         }
+    }
+}
+
+impl Assets {
+    /// Instantiate the world nodes of a compiled map (`maps/<name>/world.vwrld_c`) as model objects.
+    /// Returns the number of objects spawned and the world bounds.
+    pub fn load_map(&mut self, scene: &mut Scene, r: &mut Renderer, world_path: &str) -> (usize, Vec3, Vec3) {
+        use sbox_resource::{kv3, Resource, Value};
+        let (mut mins, mut maxs) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+        let Some(fs) = &self.fs else { return (0, mins, maxs) };
+        let kv_of = |p: &str| -> Option<Value> {
+            let d = fs.read(p)?;
+            let res = Resource::parse(&d).ok()?;
+            kv3::parse(res.block_data("DATA")?).ok()
+        };
+        let Some(world) = kv_of(world_path) else {
+            log::warn!("map not found: {world_path}");
+            return (0, mins, maxs);
+        };
+        let prefixes: Vec<String> = world
+            .get("m_worldNodes")
+            .and_then(Value::as_array)
+            .unwrap_or(&[])
+            .iter()
+            .filter_map(|n| n.get("m_worldNodePrefix").and_then(Value::as_str).map(|p| format!("{p}.vwnod")))
+            .collect();
+        let mut placements = Vec::new();
+        for node_path in prefixes {
+            let Some(node) = kv_of(&node_path) else { continue };
+            let objs = node.get("m_sceneObjects").and_then(Value::as_array).unwrap_or(&[]);
+            // Lightmapped duplicates of a mesh carry a cubemap handshake; prefer the plain variant.
+            let has_plain = objs.iter().any(|o| o.get("m_nCubeMapPrecomputedHandshake").and_then(Value::as_i64) == Some(0));
+            for o in objs {
+                if has_plain && o.get("m_nCubeMapPrecomputedHandshake").and_then(Value::as_i64) != Some(0) {
+                    continue;
+                }
+                let Some(model) = o.get("m_renderableModel").and_then(Value::as_str).filter(|s| !s.is_empty()) else { continue };
+                let rows = o.get("m_vTransform").and_then(Value::as_array).unwrap_or(&[]);
+                let row = |i: usize| -> [f32; 4] {
+                    let a = rows.get(i).and_then(Value::as_array).unwrap_or(&[]);
+                    std::array::from_fn(|j| a.get(j).and_then(Value::as_f64).unwrap_or(if i == j { 1.0 } else { 0.0 }) as f32)
+                };
+                let (r0, r1, r2) = (row(0), row(1), row(2));
+                // Rows of a 3x4 matrix: [axis-ish | translation].
+                let m = sbox_math::Mat4::from_cols(
+                    sbox_math::Vec4::new(r0[0], r1[0], r2[0], 0.0),
+                    sbox_math::Vec4::new(r0[1], r1[1], r2[1], 0.0),
+                    sbox_math::Vec4::new(r0[2], r1[2], r2[2], 0.0),
+                    sbox_math::Vec4::new(r0[3], r1[3], r2[3], 1.0),
+                );
+                let (scale, rotation, position) = m.to_scale_rotation_translation();
+                placements.push((model.to_string(), Transform::new(position, rotation, scale)));
+            }
+        }
+        let mut count = 0;
+        for (model, t) in placements {
+            let Some(m) = self.load_model(r, &model) else { continue };
+            let go = scene.create_object("map");
+            scene.set_local_transform(go, t);
+            self.spawn(scene, go, &m, [1.0; 4], None);
+            for c in [m.mins, m.maxs] {
+                let p = t.point_to_world(c);
+                mins = mins.min(p);
+                maxs = maxs.max(p);
+            }
+            count += 1;
+        }
+        (count, mins, maxs)
     }
 }

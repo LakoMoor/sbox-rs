@@ -93,6 +93,10 @@ struct App {
 
 impl App {
     fn build_scene(scene: &mut Scene, r: &mut Renderer, model: Option<&str>, anim: Option<&str>, scene_file: Option<&str>) -> sbox_scene::GoId {
+        if let Some(i) = std::env::args().position(|a| a == "--map") {
+            let name = std::env::args().nth(i + 1).expect("--map <maps/name/world.vwrld_c> --vpk <game dir>");
+            return Self::build_map_scene(scene, r, &name);
+        }
         if let Some(path) = scene_file {
             return Self::build_file_scene(scene, r, path);
         }
@@ -134,6 +138,27 @@ impl App {
 }
 
 impl App {
+    /// Load a compiled map: `--map maps/dev/preview_flat/world.vwrld_c --game <game dir>`.
+    fn build_map_scene(scene: &mut Scene, r: &mut Renderer, world: &str) -> sbox_scene::GoId {
+        use sbox_resource::vmat;
+        let args: Vec<String> = std::env::args().collect();
+        let game = args.iter().position(|a| a == "--game").and_then(|i| args.get(i + 1)).expect("--game <game dir>");
+        let mut assets = Assets::new(Some(vmat::GameFs::from_game_dir(game)));
+        let (n, mins, maxs) = assets.load_map(scene, r, world);
+        log::info!("map {world}: {n} objects, bounds {mins} .. {maxs}");
+        let sun = scene.create_object("sun");
+        scene.set_local_transform(sun, Transform::new(Vec3::ZERO, Angles::new(50.0, 30.0, 0.0).to_rotation(), Vec3::ONE));
+        scene.add_component(sun, DirectionalLight::default());
+        let center = if n > 0 { (mins + maxs) * 0.5 } else { Vec3::ZERO };
+        let extent = if n > 0 { (maxs - mins).length() } else { 500.0 };
+        let cam = scene.create_object("camera");
+        scene.set_local_transform(cam, Transform::new(center + Vec3::new(-extent * 0.4, 0.0, extent * 0.2), Angles::new(15.0, 0.0, 0.0).to_rotation(), Vec3::ONE));
+        scene.add_component(cam, CameraComponent::default());
+        scene.add_component(cam, FlyCamera::default());
+        scene.insert_resource(Input::default());
+        cam
+    }
+
     /// Load a `.scene_c` (JSON) file into the scene.
     fn build_file_scene(scene: &mut Scene, r: &mut Renderer, path: &str) -> sbox_scene::GoId {
         use sbox_resource::{vmat, Resource};
