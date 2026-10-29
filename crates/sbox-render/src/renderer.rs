@@ -3,7 +3,7 @@ use anyhow::{anyhow, Result};
 use bytemuck::{Pod, Zeroable};
 use sbox_math::{sbox_to_view, Mat4, RotationExt, Transform, Vec3};
 use sbox_resource::vtex::{TexFormat, Texture};
-use sbox_scene::{AmbientOcclusion, DepthOfField, Sharpen, TonemapMode, Tonemapping, Bloom, Vignette, CameraComponent, DirectionalLight, MaterialId, MeshId, ModelRenderer, PointLight, Scene, SpotLight};
+use sbox_scene::{AmbientOcclusion, ChromaticAberration, DepthOfField, Sharpen, TonemapMode, Tonemapping, Bloom, Vignette, CameraComponent, DirectionalLight, MaterialId, MeshId, ModelRenderer, PointLight, Scene, SpotLight};
 use wgpu::util::DeviceExt;
 
 const MAX_POINT_LIGHTS: usize = 8;
@@ -1183,6 +1183,7 @@ impl Renderer {
             let bloom = scene.iter_components::<Bloom>().next().map(|(_, b)| b);
             let vig = scene.iter_components::<Vignette>().next().map(|(_, v)| v);
             let tm = scene.iter_components::<Tonemapping>().next().map(|(_, t)| t);
+            let ca = scene.iter_components::<ChromaticAberration>().next().map_or([0.0; 2], |(_, c)| c.offset);
             let ao = scene.iter_components::<AmbientOcclusion>().next().map(|(_, a)| a);
             let dof = scene.iter_components::<DepthOfField>().next().map(|(_, d)| d);
             let sharpen = scene.iter_components::<Sharpen>().next().map_or(0.0, |(_, s)| s.scale);
@@ -1196,7 +1197,7 @@ impl Renderer {
                 fx: [sharpen, 1.0 / size.0 as f32, 1.0 / size.1 as f32, 0.0],
                 dof: dof.map_or([0.0; 4], |d| [d.focal_distance.max(1.0), d.focus_range, d.blur_size, d.back_blur as u32 as f32 + 2.0 * d.front_blur as u32 as f32]),
                 cam: [z_near, z_far, (fov_y * 0.5).tan(), aspect],
-                ao: ao.map_or([0.0; 4], |a| [a.radius, a.intensity, 0.0, 0.0]),
+                ao: ao.map_or([0.0, 0.0, ca[0], ca[1]], |a| [a.radius, a.intensity, ca[0], ca[1]]),
             };
             self.queue.write_buffer(&self.post_buf, 0, bytemuck::bytes_of(&post));
             let mut ui_groups = Vec::new();

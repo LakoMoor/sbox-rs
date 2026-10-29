@@ -315,6 +315,11 @@ impl ComponentLoader for SceneLoader<'_> {
                 scene.add_component(go, sbox_scene::AmbientOcclusion { radius: f("Radius", 128.0), intensity: f("Intensity", 1.0) });
                 true
             }
+            "ChromaticAberration" => {
+                let o = parse_vec3(p.get("Offset"), Vec3::new(4.0, 6.0, 0.0));
+                scene.add_component(go, sbox_scene::ChromaticAberration { offset: [o.x, o.y] });
+                true
+            }
             "Vignette" => {
                 let f = |k: &str, d: f64| p.get(k).and_then(Value::as_f64).unwrap_or(d) as f32;
                 scene.add_component(go, sbox_scene::Vignette { intensity: f("Intensity", 1.0), smoothness: f("Smoothness", 1.0), roundness: f("Roundness", 1.0) });

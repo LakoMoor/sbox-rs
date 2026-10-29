@@ -220,3 +220,18 @@ impl Default for AmbientOcclusion {
 impl Component for AmbientOcclusion {
     impl_component_any!();
 }
+
+/// Splits the red and blue channels apart by `offset` pixels (x, y) in opposite directions.
+pub struct ChromaticAberration {
+    pub offset: [f32; 2],
+}
+
+impl Default for ChromaticAberration {
+    fn default() -> Self {
+        Self { offset: [4.0, 6.0] }
+    }
+}
+
+impl Component for ChromaticAberration {
+    impl_component_any!();
+}

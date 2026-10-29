@@ -9,7 +9,7 @@ struct Post {
     // x = focal distance (0 = depth of field off), y = focus range, z = max blur radius in pixels, w = blur flags (1 back, 2 front)
     dof: vec4<f32>,
     cam: vec4<f32>, // x = z near, y = z far, z = tan(fov_y / 2), w = aspect
-    // x = ssao radius (0 = off), y = ssao intensity
+    // xy = ssao radius (0 = off) and intensity, zw = chromatic aberration offset in pixels
     ao: vec4<f32>,
 };
 
@@ -150,6 +150,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
             }
             c = acc / wsum;
         }
+    }
+    if (post.ao.z != 0.0 || post.ao.w != 0.0) {
+        let o = post.ao.zw * post.fx.yz;
+        c = vec3<f32>(textureSampleLevel(hdr_tex, hdr_samp, in.uv + o, 0.0).r, c.g, textureSampleLevel(hdr_tex, hdr_samp, in.uv - o, 0.0).b);
     }
     if (post.fx.x > 0.0) {
         let t = post.fx.yz;
