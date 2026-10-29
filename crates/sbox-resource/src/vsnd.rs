@@ -11,7 +11,8 @@ pub enum SoundFormat {
     Pcm16,
     Mp3,
     Vorbis,
-    /// Compressed with a codec that is not understood yet (format id 4 in the shipped files).
+    /// Raw Opus packets back to back; packet boundaries come from a table in the DATA block.
+    Opus,
     Unknown(u8),
 }
 
@@ -23,12 +24,37 @@ pub struct Sound {
     pub samples: u32,
     pub duration: f32,
     pub data: Vec<u8>,
+    /// Cumulative `(end byte offset, end sample)` per packet (Opus only).
+    pub packets: Vec<(u32, u32)>,
 }
 
 impl Sound {
+    /// Decode an Opus sound to interleaved PCM16 at 48 kHz.
+    pub fn decode_opus(&self) -> Result<Vec<i16>> {
+        let ch = self.channels as usize;
+        let mut dec = opus_decoder::OpusDecoder::new(48_000, ch).map_err(|e| anyhow::anyhow!("opus: {e:?}"))?;
+        let mut out = Vec::new();
+        let mut prev = (0usize, 0u32);
+        for &(end, end_samples) in &self.packets {
+            let end = end as usize;
+            ensure!(end >= prev.0 && end <= self.data.len(), "opus packet table out of range");
+            let frame = (end_samples - prev.1) as usize;
+            let mut pcm = vec![0i16; frame.max(2880) * ch];
+            let n = dec.decode(&self.data[prev.0..end], &mut pcm, false).map_err(|e| anyhow::anyhow!("opus packet: {e:?}"))?;
+            out.extend_from_slice(&pcm[..n * ch]);
+            prev = (end, end_samples);
+        }
+        Ok(out)
+    }
+
     /// A playable file image: PCM is wrapped in a WAV header, MP3 / Ogg are returned as they are.
     pub fn to_file_bytes(&self) -> Option<Vec<u8>> {
         match self.format {
+            SoundFormat::Opus => {
+                let pcm = self.decode_opus().ok()?;
+                let raw: Vec<u8> = pcm.iter().flat_map(|s| s.to_le_bytes()).collect();
+                Sound { sample_rate: 48_000, format: SoundFormat::Pcm16, data: raw, packets: Vec::new(), ..*self }.to_file_bytes()
+            }
             SoundFormat::Pcm16 => {
                 let mut v = Vec::with_capacity(44 + self.data.len());
                 let (ch, sr) = (self.channels as u16, self.sample_rate);
@@ -64,9 +90,21 @@ pub fn parse(file: &[u8]) -> Result<Sound> {
     let format = match (packed >> 16) as u8 {
         0 => SoundFormat::Pcm16,
         2 => SoundFormat::Mp3,
+        4 => SoundFormat::Opus,
         5 => SoundFormat::Vorbis,
         f => SoundFormat::Unknown(f),
     };
+    // Opus packet table: (cumulative end byte, cumulative end sample) pairs starting at u32 index 16.
+    let mut packets = Vec::new();
+    if format == SoundFormat::Opus {
+        let words = d.len() / 4;
+        let mut i = 16;
+        while i + 1 < words {
+            packets.push((u(i * 4), u(i * 4 + 4)));
+            i += 2;
+        }
+        ensure!(packets.last().map_or(false, |p| p.0 as usize == file.len() - start), "opus packet table does not cover the payload");
+    }
     Ok(Sound {
         sample_rate: packed & 0xFFFF,
         channels: ((packed >> 24) & 0xFF).max(1),
@@ -74,6 +112,7 @@ pub fn parse(file: &[u8]) -> Result<Sound> {
         samples: u(8),
         duration: f32::from_bits(u(12)),
         data: file[start..].to_vec(),
+        packets,
     })
 }
 
@@ -83,11 +122,23 @@ mod tests {
 
     #[test]
     fn pcm_wav_header_is_well_formed() {
-        let s = Sound { sample_rate: 44100, channels: 2, format: SoundFormat::Pcm16, samples: 1, duration: 0.0, data: vec![0; 8] };
+        let s = Sound { sample_rate: 44100, channels: 2, format: SoundFormat::Pcm16, samples: 1, duration: 0.0, data: vec![0; 8], packets: Vec::new() };
         let w = s.to_file_bytes().unwrap();
         assert_eq!(&w[0..4], b"RIFF");
         assert_eq!(u32::from_le_bytes(w[4..8].try_into().unwrap()), 36 + 8);
         assert_eq!(w.len(), 44 + 8);
+    }
+
+    #[test]
+    fn opus_music_decodes_to_header_length() {
+        let Ok(b) = std::fs::read("E:/sbox-ref/game/addons/menu/Assets/music/menu-bg2.vsnd_c") else { return };
+        let s = parse(&b).unwrap();
+        assert_eq!(s.format, SoundFormat::Opus);
+        let pcm = s.decode_opus().unwrap();
+        let secs = pcm.len() as f32 / s.channels as f32 / 48_000.0;
+        assert!((secs - s.duration).abs() < 0.1, "decoded {secs}s vs header {}s", s.duration);
+        let rms = (pcm.iter().map(|&x| (x as f64).powi(2)).sum::<f64>() / pcm.len() as f64).sqrt();
+        assert!(rms > 100.0, "decoded audio is silent (rms {rms})");
     }
 
     #[test]

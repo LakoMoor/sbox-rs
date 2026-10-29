@@ -10,3 +10,4 @@ png = "0.17"
 meshopt = "0.7"
 anyhow.workspace = true
 glam.workspace = true
+opus-decoder = "0.1.1"
