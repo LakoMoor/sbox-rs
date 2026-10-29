@@ -20,8 +20,8 @@ Conventions follow s&box: X forward, Y left, Z up; angles are pitch/yaw/roll in 
 |---|---|---|
 | `sbox-math` | `Sandbox.System/Math` | Vec/Quat (glam), `Angles`, `Transform`, `BBox`, `Ray`, `Plane` |
 | `sbox-scene` | `Sandbox.Engine/Scene` | `Scene` / `GameObject` / `Component`, s&box lifecycle order, hierarchy, deferred destroy, fixed update |
-| `sbox-resource` | closed Source 2 native core | `*_c` container, binary KV3, `vtex_c` textures (BC1-7, LZ4/ZSTD mips, PNG), VBIB vertex/index buffers (meshopt), `vmdl_c` meshes, `vmat_c` materials, virtual file resolver |
-| `sbox-render` | closed Source 2 native core | wgpu renderer: meshes, materials with BC textures, directional + point lights, depth, off-screen rendering |
+| `sbox-resource` | closed Source 2 native core | `*_c` container, binary KV3, `vtex_c` textures (BC1-7, LZ4/ZSTD mips, PNG), VBIB vertex/index buffers (meshopt), `vmdl_c` models (multi-mesh, skeleton, skin weights), `vmat_c` materials, `anim_c` animations, `skel_c`, virtual file resolver |
+| `sbox-render` | closed Source 2 native core | wgpu renderer: meshes, GPU skinning, materials with BC textures, directional + point lights, depth, off-screen rendering |
 | `sbox-app` | `Launcher` | demo window / model viewer / screenshot tool |
 
 ### Verified against real game data
@@ -29,13 +29,14 @@ Conventions follow s&box: X forward, Y left, Z up; angles are pitch/yaw/roll in 
 Checked on the `game/` directory produced by the official `Setup` step:
 
 - Resource container: 6878 / 6878 files
-- KV3 blocks: 6999 / 7014 (the rest use external blob blocks, in progress)
+- KV3 blocks: 7014 / 7014 (including external LZ4-linked blob blocks)
 - `vtex_c` textures: 2618 / 2618, mip sizes match byte for byte
 - `vmdl_c` meshes: 743 / 744 (about 3 million triangles), normals decode to unit length
+- `anim_c` clips: 1284 / 1284 parse; skinned playback of the citizen character verified visually. 198 clips show large frame-to-frame rotation jumps, some from genuinely fast motion, some possibly decoder edge cases
 
 ### Not done yet
 
-- External KV3 blob blocks (animations, physics), skeletons, skinning, `anim_c`
+- Animation blending / state graphs (`vanmgrph`), root motion, additive clips, in-model (`ANIM` block) animations
 - External `vmesh_c` references, `.shader_c` shaders, PBR / normal maps / shadows
 - VPK, audio (`vsnd_c`), physics, input, networking, UI
 - Scene / prefab serialization
@@ -54,10 +55,11 @@ Controls: WASD / QE to move, arrow keys to look, Esc to quit.
 ### Running with real assets
 
 1. Clone [sbox-public](https://github.com/Facepunch/sbox-public) and run its `Setup.bat` / `Setup.sh` (downloads the native binaries and compiled resources, ~10 GB).
-2. Open a compiled model; materials and textures are resolved from the enclosing `game/` directory:
+2. Open a compiled model, optionally with an animation clip; materials, textures and skeletons are resolved from the enclosing `game/` directory:
 
 ```
 cargo run -p sbox-app --release -- path/to/game/core/models/dev/gordon_at_desk.vmdl_c
+cargo run -p sbox-app --release -- path/to/game/addons/citizen/Assets/models/citizen/citizen.vmdl_c --anim path/to/game/addons/citizen/Assets/clips/avatarmenu_entry_walkin_01.anim_c
 ```
 
 ### Screenshots without a window
@@ -78,7 +80,7 @@ cargo run --release -p sbox-resource --example survey -- path/to/game
 
 ## Roadmap
 
-1. KV3 external blobs, then skeletons, skinning and `anim_c` animations
+1. Animation graphs, additive clips, root motion; clothing (`clothing_c`) and mesh groups
 2. `vmesh_c` references, shaders, normal maps / PBR, shadows
 3. VPK and a proper virtual file system
 4. Scene / prefab loading (`*.scene`, `*.prefab`)

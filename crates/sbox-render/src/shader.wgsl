@@ -13,9 +13,13 @@ struct Object {
     model: mat4x4<f32>,
     normal_m: mat4x4<f32>,
     tint: vec4<f32>,
+    params: vec4<u32>, // x = bone base, y = skinned
+    _pad: vec4<f32>,
+    _pad2: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> g: Globals;
+@group(0) @binding(1) var<storage, read> bones: array<mat4x4<f32>>;
 @group(1) @binding(0) var<uniform> obj: Object;
 
 struct Material {
@@ -30,6 +34,8 @@ struct VsIn {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) uv: vec2<f32>,
+    @location(3) joints: vec4<u32>,
+    @location(4) weights: vec4<f32>,
 };
 
 struct VsOut {
@@ -42,10 +48,21 @@ struct VsOut {
 @vertex
 fn vs_main(in: VsIn) -> VsOut {
     var out: VsOut;
-    let wp = obj.model * vec4<f32>(in.position, 1.0);
+    var pos = vec4<f32>(in.position, 1.0);
+    var nrm = vec4<f32>(in.normal, 0.0);
+    if (obj.params.y != 0u) {
+        let b = obj.params.x;
+        let skin = bones[b + in.joints.x] * in.weights.x
+                 + bones[b + in.joints.y] * in.weights.y
+                 + bones[b + in.joints.z] * in.weights.z
+                 + bones[b + in.joints.w] * in.weights.w;
+        pos = skin * pos;
+        nrm = skin * nrm;
+    }
+    let wp = obj.model * pos;
     out.world_pos = wp.xyz;
     out.clip = g.view_proj * wp;
-    out.normal = normalize((obj.normal_m * vec4<f32>(in.normal, 0.0)).xyz);
+    out.normal = normalize((obj.normal_m * nrm).xyz);
     out.uv = in.uv;
     return out;
 }

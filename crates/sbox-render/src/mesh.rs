@@ -6,6 +6,8 @@ pub struct Vertex {
     pub position: [f32; 3],
     pub normal: [f32; 3],
     pub uv: [f32; 2],
+    pub joints: [u8; 4],
+    pub weights: [f32; 4],
 }
 
 pub struct MeshData {
@@ -32,7 +34,7 @@ impl MeshData {
             let base = vertices.len() as u32;
             for (su, sv, uv) in [(-1.0, -1.0, [0.0, 1.0]), (1.0, -1.0, [1.0, 1.0]), (1.0, 1.0, [1.0, 0.0]), (-1.0, 1.0, [0.0, 0.0])] {
                 let p = (n + u * su + v * sv) * h;
-                vertices.push(Vertex { position: p.to_array(), normal: n.to_array(), uv });
+                vertices.push(Vertex { position: p.to_array(), normal: n.to_array(), uv, joints: [0; 4], weights: [0.0; 4] });
             }
             indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
         }
@@ -44,7 +46,7 @@ impl MeshData {
         let h = size * 0.5;
         let vertices = [(-h, -h, [0.0, 1.0]), (h, -h, [1.0, 1.0]), (h, h, [1.0, 0.0]), (-h, h, [0.0, 0.0])]
             .into_iter()
-            .map(|(x, y, uv)| Vertex { position: [x, y, 0.0], normal: [0.0, 0.0, 1.0], uv })
+            .map(|(x, y, uv)| Vertex { position: [x, y, 0.0], normal: [0.0, 0.0, 1.0], uv, joints: [0; 4], weights: [0.0; 4] })
             .collect();
         Self { vertices, indices: vec![0, 1, 2, 0, 2, 3] }
     }
@@ -61,6 +63,8 @@ impl MeshData {
                     position: (n * radius).to_array(),
                     normal: n.to_array(),
                     uv: [s as f32 / segments as f32, r as f32 / rings as f32],
+                    joints: [0; 4],
+                    weights: [0.0; 4],
                 });
             }
         }
@@ -83,7 +87,7 @@ impl MeshData {
         let mut indices = Vec::new();
         for dc in &m.draw_calls {
             let base = vertices.len() as u32;
-            vertices.extend(dc.vertices.iter().map(|v| Vertex { position: v.position, normal: v.normal, uv: v.uv }));
+            vertices.extend(dc.vertices.iter().map(|v| Vertex { position: v.position, normal: v.normal, uv: v.uv, joints: v.joints, weights: v.weights }));
             indices.extend(dc.indices.iter().map(|i| i + base));
         }
         Self { vertices, indices }
@@ -93,7 +97,7 @@ impl MeshData {
 impl MeshData {
     pub fn from_draw_call(dc: &sbox_resource::mesh::DrawCall) -> Self {
         Self {
-            vertices: dc.vertices.iter().map(|v| Vertex { position: v.position, normal: v.normal, uv: v.uv }).collect(),
+            vertices: dc.vertices.iter().map(|v| Vertex { position: v.position, normal: v.normal, uv: v.uv, joints: v.joints, weights: v.weights }).collect(),
             indices: dc.indices.clone(),
         }
     }

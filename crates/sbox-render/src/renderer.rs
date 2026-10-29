@@ -7,6 +7,7 @@ use sbox_scene::{CameraComponent, DirectionalLight, MaterialId, MeshId, ModelRen
 use wgpu::util::DeviceExt;
 
 const MAX_POINT_LIGHTS: usize = 8;
+const MAX_BONES: usize = 32768;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
 #[repr(C)]
@@ -28,7 +29,8 @@ struct ObjectUniform {
     model: [[f32; 4]; 4],
     normal_m: [[f32; 4]; 4],
     tint: [f32; 4],
-    _pad: [f32; 12], // total 192 bytes; per-object stride is aligned to the device limit
+    params: [u32; 4], // x = bone base, y = skinned
+    _pad: [f32; 8],   // total 192 bytes; per-object stride is aligned to the device limit
 }
 
 #[repr(C)]
@@ -60,6 +62,7 @@ pub struct Renderer {
     pipeline: wgpu::RenderPipeline,
     globals_buf: wgpu::Buffer,
     globals_bg: wgpu::BindGroup,
+    bones_buf: wgpu::Buffer,
     object_layout: wgpu::BindGroupLayout,
     object_buf: wgpu::Buffer,
     object_bg: wgpu::BindGroup,
@@ -119,7 +122,19 @@ impl Renderer {
         };
         let globals_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("globals"),
-            entries: &[uniform_entry(false)],
+            entries: &[
+                uniform_entry(false),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
         });
         let object_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("object"),
@@ -132,10 +147,19 @@ impl Renderer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let bones_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("bones"),
+            size: (MAX_BONES * 64) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let globals_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("globals"),
             layout: &globals_layout,
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: globals_buf.as_entire_binding() }],
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: globals_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: bones_buf.as_entire_binding() },
+            ],
         });
 
         let align = device.limits().min_uniform_buffer_offset_alignment as u64;
@@ -199,7 +223,7 @@ impl Renderer {
                 buffers: &[wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<Vertex>() as u64,
                     step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2],
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Uint8x4, 4 => Float32x4],
                 }],
             },
             fragment: Some(wgpu::FragmentState {
@@ -239,6 +263,7 @@ impl Renderer {
             pipeline,
             globals_buf,
             globals_bg,
+            bones_buf,
             object_layout,
             object_buf,
             object_bg,
@@ -514,12 +539,18 @@ impl Renderer {
         self.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
 
         // Gather draws.
+        let mut bone_mats: Vec<[[f32; 4]; 4]> = Vec::new();
         let draws: Vec<(MeshId, MaterialId, ObjectUniform)> = scene
             .iter_components::<ModelRenderer>()
             .filter(|(_, m)| (m.mesh.0 as usize) < self.meshes.len())
             .map(|(go, m)| {
                 let model = scene.world_transform(go).to_matrix();
                 let normal_m = model.inverse().transpose();
+                let mut params = [0u32; 4];
+                if !m.bones.is_empty() && bone_mats.len() + m.bones.len() <= MAX_BONES {
+                    params = [bone_mats.len() as u32, 1, 0, 0];
+                    bone_mats.extend_from_slice(&m.bones);
+                }
                 (
                     m.mesh,
                     m.material,
@@ -527,11 +558,15 @@ impl Renderer {
                         model: model.to_cols_array_2d(),
                         normal_m: normal_m.to_cols_array_2d(),
                         tint: m.tint,
-                        _pad: [0.0; 12],
+                        params,
+                        _pad: [0.0; 8],
                     },
                 )
             })
             .collect();
+        if !bone_mats.is_empty() {
+            self.queue.write_buffer(&self.bones_buf, 0, bytemuck::cast_slice(&bone_mats));
+        }
 
         if draws.len() > self.object_capacity {
             self.object_capacity = draws.len().next_power_of_two();

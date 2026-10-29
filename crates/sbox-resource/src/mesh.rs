@@ -10,6 +10,10 @@ pub struct MeshVertex {
     pub position: [f32; 3],
     pub normal: [f32; 3],
     pub uv: [f32; 2],
+    /// Skeleton bone indices (already remapped), 0 when unskinned.
+    pub joints: [u8; 4],
+    /// Blend weights; all zero when unskinned.
+    pub weights: [f32; 4],
 }
 
 #[derive(Clone, Debug)]
@@ -112,7 +116,7 @@ fn attr<'a>(vb: &'a VertexBuffer, name: &str) -> Option<&'a Attribute> {
     vb.attributes.iter().find(|a| a.name.eq_ignore_ascii_case(name) && a.semantic_index == 0)
 }
 
-fn read_vertex(vb: &VertexBuffer, i: usize, compressed: bool) -> MeshVertex {
+fn read_vertex(vb: &VertexBuffer, i: usize, compressed: bool, remap: Option<&[i32]>) -> MeshVertex {
     let base = i * vb.stride as usize;
     let v = &vb.data[base..base + vb.stride as usize];
     let mut out = MeshVertex { normal: [0.0, 0.0, 1.0], ..Default::default() };
@@ -126,6 +130,20 @@ fn read_vertex(vb: &VertexBuffer, i: usize, compressed: bool) -> MeshVertex {
     if let Some(a) = attr(vb, "TEXCOORD") {
         out.uv = decode_uv(a.format, &v[a.offset as usize..]);
     }
+    if let (Some(bi), Some(bw)) = (attr(vb, "BLENDINDICES"), attr(vb, "BLENDWEIGHT")) {
+        let (io, wo) = (bi.offset as usize, bw.offset as usize);
+        let mut sum = 0.0;
+        for k in 0..4 {
+            let local = v[io + k] as usize;
+            let bone = remap.and_then(|r| r.get(local)).copied().unwrap_or(local as i32).max(0) as u8;
+            out.joints[k] = bone;
+            out.weights[k] = v[wo + k] as f32 / 255.0;
+            sum += out.weights[k];
+        }
+        if sum > 0.0 {
+            out.weights.iter_mut().for_each(|w| *w /= sum);
+        }
+    }
     out
 }
 
@@ -137,6 +155,11 @@ fn vec3(v: &Value) -> [f32; 3] {
 
 /// Build a render mesh from a `CRenderMesh` KV3 and its buffers.
 pub fn build(mesh_kv: &Value, vbib: &Vbib) -> Result<RenderMesh> {
+    build_with_remap(mesh_kv, vbib, None)
+}
+
+/// Like [`build`], mapping mesh-local bone indices to skeleton bones through `remap`.
+pub fn build_with_remap(mesh_kv: &Value, vbib: &Vbib, remap: Option<&[i32]>) -> Result<RenderMesh> {
     let mut out = RenderMesh { mins: [f32::MAX; 3], maxs: [f32::MIN; 3], ..Default::default() };
     let objects = mesh_kv.get("m_sceneObjects").and_then(Value::as_array).ok_or_else(|| anyhow!("no m_sceneObjects"))?;
     for so in objects {
@@ -174,7 +197,7 @@ pub fn build(mesh_kv: &Value, vbib: &Vbib) -> Result<RenderMesh> {
                 Some("RENDER_PRIM_TRIANGLES") | None => {}
                 Some(other) => bail!("unsupported primitive type {other}"),
             }
-            let vertices = (0..vertex_count).map(|i| read_vertex(vb, base_vertex + i, compressed)).collect();
+            let vertices = (0..vertex_count).map(|i| read_vertex(vb, base_vertex + i, compressed, remap)).collect();
             let sz = ib.index_size as usize;
             let indices = (start_index..start_index + index_count)
                 .map(|i| {

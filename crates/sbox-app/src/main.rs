@@ -24,6 +24,29 @@ impl Component for Spinner {
     impl_component_any!();
 }
 
+/// Plays an animation on a skinned model: recomputes skinning matrices every frame.
+struct Animator {
+    anim: sbox_resource::anim::Animation,
+    skeleton: sbox_resource::model::Skeleton,
+    anim_skel: sbox_resource::model::AnimSkeleton,
+    parts: Vec<sbox_scene::GoId>,
+    time: f32,
+}
+
+impl Component for Animator {
+    fn on_update(&mut self, scene: &mut Scene, _h: Handle) {
+        self.time += scene.delta;
+        let poses = self.anim.sample(self.time);
+        let mats = self.skeleton.skin_matrices(&self.anim_skel, &poses);
+        for &go in &self.parts {
+            if let Some(m) = scene.component_mut::<ModelRenderer>(go) {
+                m.bones = mats.clone();
+            }
+        }
+    }
+    impl_component_any!();
+}
+
 /// Simple fly camera: WASD + QE, arrow keys to look.
 #[derive(Default)]
 struct FlyCamera {
@@ -57,9 +80,9 @@ struct App {
 }
 
 impl App {
-    fn build_scene(scene: &mut Scene, r: &mut Renderer, model: Option<&str>) -> sbox_scene::GoId {
+    fn build_scene(scene: &mut Scene, r: &mut Renderer, model: Option<&str>, anim: Option<&str>) -> sbox_scene::GoId {
         if let Some(path) = model {
-            return Self::build_model_scene(scene, r, path);
+            return Self::build_model_scene(scene, r, path, anim);
         }
         let cube = r.upload_mesh(&MeshData::cuboid(Vec3::splat(64.0)));
         let ground = r.upload_mesh(&MeshData::plane(2000.0));
@@ -97,48 +120,72 @@ impl App {
 
 impl App {
     /// Show a single compiled model (`.vmdl_c`) with a camera framed on its bounds.
-    fn build_model_scene(scene: &mut Scene, r: &mut Renderer, path: &str) -> sbox_scene::GoId {
-        use sbox_resource::{vmat, vtex};
+    fn build_model_scene(scene: &mut Scene, r: &mut Renderer, path: &str, anim_path: Option<&str>) -> sbox_scene::GoId {
+        use sbox_resource::{anim, model, vmat, vtex};
         let bytes = std::fs::read(path).expect("read model");
-        let rm = sbox_resource::mesh::load_embedded(&bytes).expect("load model");
-        log::info!("{path}: {} draw calls, bounds {:?}..{:?}", rm.draw_calls.len(), rm.mins, rm.maxs);
+        let md = model::load(&bytes).expect("load model");
+        let meshes: Vec<_> = md.default_meshes().collect();
+        log::info!("{path}: {} meshes ({} shown), {} bones", md.meshes.len(), meshes.len(), md.skeleton.len());
 
         // game directory = nearest ancestor named "game"
         let game_dir = std::path::Path::new(path).ancestors().find(|p| p.file_name().map_or(false, |n| n == "game"));
         let fs = game_dir.map(vmat::GameFs::from_game_dir);
 
-        let center = (Vec3::from(rm.mins) + Vec3::from(rm.maxs)) * 0.5;
-        let radius = ((Vec3::from(rm.maxs) - Vec3::from(rm.mins)).length() * 0.5).max(1.0);
+        let (mut mins, mut maxs) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+        for m in &meshes {
+            mins = mins.min(Vec3::from(m.mesh.mins));
+            maxs = maxs.max(Vec3::from(m.mesh.maxs));
+        }
+        let center = (mins + maxs) * 0.5;
+        let radius = ((maxs - mins).length() * 0.5).max(1.0);
 
         let root = scene.create_object("model");
         scene.set_local_transform(root, Transform::from_position(-center));
         let mut cache: std::collections::HashMap<String, sbox_scene::MaterialId> = Default::default();
-        for (i, dc) in rm.draw_calls.iter().enumerate() {
-            let mesh = r.upload_mesh(&MeshData::from_draw_call(dc));
-            let mat = *cache.entry(dc.material.clone()).or_insert_with(|| {
-                let Some(fs) = &fs else { return sbox_scene::MaterialId(0) };
-                let Some(data) = fs.read(&dc.material) else {
-                    log::warn!("material not found: {}", dc.material);
-                    return sbox_scene::MaterialId(0);
-                };
-                let m = match vmat::parse(&data) {
-                    Ok(m) => m,
-                    Err(e) => {
-                        log::warn!("material {}: {e:#}", dc.material);
+        let mut parts = Vec::new();
+        for (mi, mm) in meshes.iter().enumerate() {
+            for (i, dc) in mm.mesh.draw_calls.iter().enumerate() {
+                let mesh = r.upload_mesh(&MeshData::from_draw_call(dc));
+                let mat = *cache.entry(dc.material.clone()).or_insert_with(|| {
+                    let Some(fs) = &fs else { return sbox_scene::MaterialId(0) };
+                    let Some(data) = fs.read(&dc.material) else {
+                        log::warn!("material not found: {}", dc.material);
                         return sbox_scene::MaterialId(0);
-                    }
-                };
-                let tex = m
-                    .color_texture()
-                    .and_then(|t| fs.read(t))
-                    .and_then(|d| vtex::parse(&d).map_err(|e| log::warn!("texture: {e:#}")).ok())
-                    .and_then(|t| r.upload_texture(&t));
-                r.create_material(tex, m.color_tint(), m.uv_scale())
-            });
-            let go = scene.create_object_in(Some(root), &format!("drawcall{i}"));
-            let mut m = ModelRenderer::new(mesh);
-            m.material = mat;
-            scene.add_component(go, m);
+                    };
+                    let m = match vmat::parse(&data) {
+                        Ok(m) => m,
+                        Err(e) => {
+                            log::warn!("material {}: {e:#}", dc.material);
+                            return sbox_scene::MaterialId(0);
+                        }
+                    };
+                    let tex = m
+                        .color_texture()
+                        .and_then(|t| fs.read(t))
+                        .and_then(|d| vtex::parse(&d).map_err(|e| log::warn!("texture: {e:#}")).ok())
+                        .and_then(|t| r.upload_texture(&t));
+                    r.create_material(tex, m.color_tint(), m.uv_scale())
+                });
+                let go = scene.create_object_in(Some(root), &format!("mesh{mi}_dc{i}"));
+                let mut m = ModelRenderer::new(mesh);
+                m.material = mat;
+                scene.add_component(go, m);
+                parts.push(go);
+            }
+        }
+
+        if let Some(ap) = anim_path {
+            let a = anim::parse(&std::fs::read(ap).expect("read anim")).expect("parse anim");
+            log::info!("{ap}: {} frames, {:.2}s, {} tracks", a.frames, a.duration, a.tracks.len());
+            let anim_skel = fs
+                .as_ref()
+                .and_then(|fs| fs.read(&a.skeleton))
+                .and_then(|d| model::load_skel(&d).map_err(|e| log::warn!("skeleton: {e:#}")).ok())
+                .unwrap_or_else(|| {
+                    log::warn!("animation skeleton {} not found; using model bone order", a.skeleton);
+                    model::AnimSkeleton { names: md.skeleton.names.clone(), parents: md.skeleton.parents.clone() }
+                });
+            scene.add_component(root, Animator { anim: a, skeleton: md.skeleton.clone(), anim_skel, parts, time: 0.0 });
         }
 
         let sun = scene.create_object("sun");
@@ -166,7 +213,7 @@ impl ApplicationHandler for App {
         let mut renderer = Renderer::new(window.clone(), (size.width, size.height)).expect("renderer");
         let args: Vec<String> = std::env::args().skip(1).collect();
         let model = args.iter().find(|a| !a.starts_with("--") && a.ends_with("_c")).cloned();
-        self.camera = Some(Self::build_scene(&mut self.scene, &mut renderer, model.as_deref()));
+        self.camera = Some(Self::build_scene(&mut self.scene, &mut renderer, model.as_deref(), args.iter().position(|a| a == "--anim").and_then(|i| args.get(i + 1)).map(String::as_str)));
         if let Some(i) = args.iter().position(|a| a == "--screenshot") {
             let out = args.get(i + 1).expect("--screenshot <file.png>");
             let secs: f32 = args.iter().position(|a| a == "--time").and_then(|j| args.get(j + 1)).and_then(|v| v.parse().ok()).unwrap_or(1.0);

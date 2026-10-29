@@ -97,6 +97,10 @@ struct Cursor<'a> {
     types: &'a [u8],
     tpos: usize,
     strings: Vec<String>,
+    /// External blobs (blocks) stored after the main buffer: concatenated data + ranges.
+    blob_data: Vec<u8>,
+    blob_ranges: Vec<(usize, usize)>,
+    blob_next: usize,
 }
 
 impl<'a> Cursor<'a> {
@@ -146,6 +150,11 @@ impl<'a> Cursor<'a> {
             4 => Value::UInt(u64::from_le_bytes(self.eight()?)),
             5 => Value::Double(f64::from_le_bytes(self.eight()?)),
             6 => Value::String(self.string()?),
+            7 if !self.blob_ranges.is_empty() => {
+                let (a, len) = *self.blob_ranges.get(self.blob_next).ok_or_else(|| anyhow::anyhow!("kv3: blob index out of range"))?;
+                self.blob_next += 1;
+                Value::Blob(self.blob_data[a..a + len].to_vec())
+            }
             7 => {
                 let n = self.int()? as usize;
                 ensure!(self.bpos + n <= self.bytes.len(), "kv3: blob out of range");
@@ -200,7 +209,6 @@ fn align(x: usize, a: usize) -> usize {
 
 pub fn parse(d: &[u8]) -> Result<Value> {
     let h = read_header(d)?;
-    ensure!(h.block_count == 0, "kv3: external blob blocks not supported yet");
     let buf = decompress(d, &h)?;
     let n_bytes = h.n_bytes as usize;
     let ints_start = align(n_bytes, 4);
@@ -219,9 +227,38 @@ pub fn parse(d: &[u8]) -> Result<Value> {
         strings.push(String::from_utf8_lossy(&buf[pos..pos + end]).into_owned());
         pos += end + 1;
     }
-    // trailing 4-byte terminator 00 DD EE FF
-    let types_end = buf.len().saturating_sub(4);
-    ensure!(pos <= types_end, "kv3: no type data");
+    // After strings+types: [u32 blob size] * block_count, 00 DD EE FF, [u16 compressed size] * block_count
+    let types_end = eights_end + h.types_size as usize;
+    ensure!(pos <= types_end && types_end <= buf.len(), "kv3: no type data");
+    let (mut blob_data, mut blob_ranges) = (Vec::new(), Vec::new());
+    if h.block_count > 0 {
+        let n = h.block_count as usize;
+        let sizes_end = types_end + 4 * n;
+        ensure!(sizes_end + 4 + 2 * n <= buf.len(), "kv3: blob tables truncated");
+        let sizes: Vec<usize> =
+            (0..n).map(|i| u32::from_le_bytes(buf[types_end + i * 4..types_end + i * 4 + 4].try_into().unwrap()) as usize).collect();
+        let comp: Vec<usize> = (0..n)
+            .map(|i| u16::from_le_bytes([buf[sizes_end + 4 + i * 2], buf[sizes_end + 4 + i * 2 + 1]]) as usize)
+            .collect();
+        let tail = &d[h.payload_start + h.compressed as usize..];
+        blob_data.reserve(h.block_total as usize);
+        let mut tpos = 0usize;
+        for (size, c) in sizes.iter().zip(&comp) {
+            ensure!(tpos + c <= tail.len(), "kv3: blob data truncated");
+            let src = &tail[tpos..tpos + c];
+            tpos += c;
+            let start = blob_data.len();
+            if *c == *size {
+                blob_data.extend_from_slice(src);
+            } else {
+                // LZ4 blocks are linked: matches may reference up to 64 KiB of earlier output.
+                let dict_start = start.saturating_sub(65536);
+                let out = lz4_flex::block::decompress_with_dict(src, *size, &blob_data[dict_start..start])?;
+                blob_data.extend_from_slice(&out);
+            }
+            blob_ranges.push((start, *size));
+        }
+    }
     let mut c = Cursor {
         bytes: &buf[..n_bytes],
         bpos: 0,
@@ -232,9 +269,14 @@ pub fn parse(d: &[u8]) -> Result<Value> {
         types: &buf[pos..types_end],
         tpos: 0,
         strings,
+        blob_data,
+        blob_ranges,
+        blob_next: 0,
     };
     let t = c.ty_flags()?;
-    c.value(t)
+    let v = c.value(t)?;
+    ensure!(c.blob_next == c.blob_ranges.len(), "kv3: {} of {} external blobs consumed", c.blob_next, c.blob_ranges.len());
+    Ok(v)
 }
 
 impl Value {

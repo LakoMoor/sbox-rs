@@ -1751,6 +1751,7 @@ name = "sbox-resource"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "glam",
  "lz4_flex",
  "meshopt",
  "png",

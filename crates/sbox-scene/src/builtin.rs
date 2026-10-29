@@ -41,11 +41,13 @@ pub struct ModelRenderer {
     pub material: MaterialId,
     pub tint: [f32; 4],
     pub cast_shadows: bool,
+    /// Skinning matrices (model space, bind-relative). Empty = not skinned.
+    pub bones: Vec<[[f32; 4]; 4]>,
 }
 
 impl ModelRenderer {
     pub fn new(mesh: MeshId) -> Self {
-        Self { mesh, material: MaterialId(0), tint: [1.0; 4], cast_shadows: true }
+        Self { mesh, material: MaterialId(0), tint: [1.0; 4], cast_shadows: true, bones: Vec::new() }
     }
 }
 

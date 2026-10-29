@@ -28,14 +28,19 @@ fn main() -> anyhow::Result<()> {
             .collect();
         println!("sizes[..4]={:?} comp[..4]={:?} sum comp {}", &sizes[..4.min(sizes.len())], &comp[..4.min(comp.len())], comp.iter().sum::<usize>());
         let mut pos = 0;
+        let mut history: Vec<u8> = Vec::new();
         let (mut okc, mut bad) = (0, 0);
         for (s, c) in sizes.iter().zip(&comp) {
             if pos + c > tail.len() {
                 bad += 1;
                 break;
             }
-            match lz4_flex::block::decompress(&tail[pos..pos + c], *s as usize) {
-                Ok(_) => okc += 1,
+            let dict = &history[history.len().saturating_sub(65536)..];
+            match lz4_flex::block::decompress_with_dict(&tail[pos..pos + c], *s as usize, dict) {
+                Ok(o) => {
+                    okc += 1;
+                    history.extend_from_slice(&o);
+                }
                 Err(_) => bad += 1,
             }
             pos += c;
