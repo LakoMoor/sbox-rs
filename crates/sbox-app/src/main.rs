@@ -112,7 +112,7 @@ struct App {
 /// `--host <addr>` serves the physics props to clients; `--join <addr>` mirrors a server's props.
 enum Net {
     Host(sbox_net::Server, sbox_net::replication::RemotePlayers),
-    Join(sbox_net::Client, Instant),
+    Join(sbox_net::Client, Instant, sbox_net::replication::Prediction),
 }
 
 impl App {
@@ -289,7 +289,7 @@ impl App {
                 p.enabled = false;
             }
             match sbox_net::Client::connect(&addr, "player") {
-                Ok(c) => return Some(Net::Join(c, Instant::now())),
+                Ok(c) => return Some(Net::Join(c, Instant::now(), Default::default())),
                 Err(e) => log::error!("--join {addr}: {e:#}"),
             }
         }
@@ -307,21 +307,31 @@ impl App {
                     }
                     players.handle(&mut self.scene, &e, spawn);
                 }
-                players.step(&mut self.scene, dt);
                 server.broadcast(&sbox_net::replication::collect(&self.scene));
             }
-            Some(Net::Join(client, last_try)) => {
+            Some(Net::Join(client, last_try, prediction)) => {
+                use sbox_net::replication::{apply_except, PLAYER_ID_BASE};
                 client.poll();
+                let mut own = None;
                 if client.client_id.is_none() && last_try.elapsed().as_secs_f32() > 0.5 {
                     client.retry_connect("player");
                     *last_try = Instant::now();
-                } else if client.client_id.is_some() {
-                    // Movement from the key actions and the look direction of the local camera.
+                } else if let Some(id) = client.client_id {
+                    own = Some(PLAYER_ID_BASE + id);
+                    // Movement from the key actions and the look direction of the local camera, predicted locally.
                     let input = self.scene.resource::<Input>().cloned().unwrap_or_default();
                     let yaw = self.camera.map_or(0.0, |c| self.scene.world_transform(c).rotation.angles().yaw);
-                    client.send_input([input.axis("Forward", "Backward"), input.axis("Left", "Right")], yaw, 0.0, 0);
+                    let predicted = prediction.step(client, [input.axis("Forward", "Backward"), input.axis("Left", "Right")], yaw, 0.0, 0, dt);
+                    if let Some(p) = predicted {
+                        let go = self.scene.iter_components::<sbox_net::replication::NetworkId>().find(|(_, n)| Some(n.0) == own).map(|(go, _)| go);
+                        if let Some(go) = go {
+                            let mut t = self.scene.world_transform(go);
+                            t.position = p;
+                            self.scene.set_world_transform(go, t);
+                        }
+                    }
                 }
-                sbox_net::replication::apply(&mut self.scene, client, 0.3);
+                apply_except(&mut self.scene, client, 0.3, own);
             }
             None => {}
         }

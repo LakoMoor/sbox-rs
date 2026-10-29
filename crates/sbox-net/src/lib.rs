@@ -26,8 +26,10 @@ pub enum Packet {
     Connect { name: String },
     Accepted { client_id: u32 },
     /// Per-tick client input: movement axes in -1..1, look angles in degrees and a button bit set.
-    Input { seq: u32, movement: [f32; 2], yaw: f32, pitch: f32, buttons: u32 },
-    Snapshot { tick: u32, entities: Vec<EntityState> },
+    /// `dt` is the client frame time the movement was held for; the server integrates it exactly once.
+    Input { seq: u32, movement: [f32; 2], yaw: f32, pitch: f32, buttons: u32, dt: f32 },
+    /// `ack` is the last input of the receiving client that the server has applied.
+    Snapshot { tick: u32, ack: u32, entities: Vec<EntityState> },
     Disconnect,
     /// Reliable remote call: delivered at least once by retransmission, executed once (the receiver drops duplicates).
     Rpc { id: u32, name: String, args: Vec<u8> },
@@ -84,17 +86,18 @@ impl Packet {
                 w.0.push(2);
                 w.u32(*client_id);
             }
-            Packet::Input { seq, movement, yaw, pitch, buttons } => {
+            Packet::Input { seq, movement, yaw, pitch, buttons, dt } => {
                 w.0.push(3);
                 w.u32(*seq);
-                for v in [movement[0], movement[1], *yaw, *pitch] {
+                for v in [movement[0], movement[1], *yaw, *pitch, *dt] {
                     w.f32(v);
                 }
                 w.u32(*buttons);
             }
-            Packet::Snapshot { tick, entities } => {
+            Packet::Snapshot { tick, ack, entities } => {
                 w.0.push(4);
                 w.u32(*tick);
+                w.u32(*ack);
                 w.u32(entities.len() as u32);
                 for e in entities {
                     w.u32(e.id);
@@ -131,9 +134,14 @@ impl Packet {
                 Packet::Connect { name: String::from_utf8_lossy(r.take(n)?).into_owned() }
             }
             2 => Packet::Accepted { client_id: r.u32()? },
-            3 => Packet::Input { seq: r.u32()?, movement: [r.f32()?, r.f32()?], yaw: r.f32()?, pitch: r.f32()?, buttons: r.u32()? },
+            3 => {
+                let seq = r.u32()?;
+                let (m0, m1, yaw, pitch, dt) = (r.f32()?, r.f32()?, r.f32()?, r.f32()?, r.f32()?);
+                Packet::Input { seq, movement: [m0, m1], yaw, pitch, buttons: r.u32()?, dt }
+            }
             4 => {
                 let tick = r.u32()?;
+                let ack = r.u32()?;
                 let n = r.u32()? as usize;
                 // Reject counts the packet cannot hold before allocating.
                 if n > MAX_PACKET / ENTITY_BYTES {
@@ -143,7 +151,7 @@ impl Packet {
                 for _ in 0..n {
                     entities.push(EntityState { id: r.u32()?, position: [r.f32()?, r.f32()?, r.f32()?], rotation: [r.f32()?, r.f32()?, r.f32()?, r.f32()?] });
                 }
-                Packet::Snapshot { tick, entities }
+                Packet::Snapshot { tick, ack, entities }
             }
             5 => Packet::Disconnect,
             6 => {
@@ -216,7 +224,7 @@ impl Inbox {
 #[derive(Clone, Debug, PartialEq)]
 pub enum ServerEvent {
     Connected { client_id: u32, name: String },
-    Input { client_id: u32, seq: u32, movement: [f32; 2], yaw: f32, pitch: f32, buttons: u32 },
+    Input { client_id: u32, seq: u32, movement: [f32; 2], yaw: f32, pitch: f32, buttons: u32, dt: f32 },
     Disconnected { client_id: u32 },
     Rpc { client_id: u32, name: String, args: Vec<u8> },
 }
@@ -225,6 +233,8 @@ pub struct Server {
     socket: UdpSocket,
     clients: HashMap<SocketAddr, u32>,
     reliable: HashMap<u32, (Outbox, Inbox)>,
+    /// Last input number applied per client, echoed in snapshots.
+    acked: HashMap<u32, u32>,
     next_id: u32,
     pub tick: u32,
 }
@@ -233,7 +243,7 @@ impl Server {
     pub fn bind(addr: &str) -> Result<Self> {
         let socket = UdpSocket::bind(addr)?;
         socket.set_nonblocking(true)?;
-        Ok(Self { socket, clients: HashMap::new(), reliable: HashMap::new(), next_id: 1, tick: 0 })
+        Ok(Self { socket, clients: HashMap::new(), reliable: HashMap::new(), acked: HashMap::new(), next_id: 1, tick: 0 })
     }
 
     pub fn local_addr(&self) -> Result<SocketAddr> {
@@ -266,14 +276,18 @@ impl Server {
                     };
                     let _ = self.socket.send_to(&Packet::Accepted { client_id: id }.encode(), from);
                 }
-                Packet::Input { seq, movement, yaw, pitch, buttons } => {
+                Packet::Input { seq, movement, yaw, pitch, buttons, dt } => {
                     if let Some(&client_id) = self.clients.get(&from) {
-                        events.push(ServerEvent::Input { client_id, seq, movement, yaw, pitch, buttons });
+                        // Inputs are applied in arrival order; a reordered older one still counts as applied.
+                        let a = self.acked.entry(client_id).or_default();
+                        *a = (*a).max(seq);
+                        events.push(ServerEvent::Input { client_id, seq, movement, yaw, pitch, buttons, dt });
                     }
                 }
                 Packet::Disconnect => {
                     if let Some(client_id) = self.clients.remove(&from) {
                         self.reliable.remove(&client_id);
+                        self.acked.remove(&client_id);
                         events.push(ServerEvent::Disconnected { client_id });
                     }
                 }
@@ -320,8 +334,9 @@ impl Server {
         let per_packet = MAX_PACKET / ENTITY_BYTES - 1;
         let chunks: Vec<&[EntityState]> = if entities.is_empty() { vec![&[]] } else { entities.chunks(per_packet).collect() };
         for chunk in chunks {
-            let data = Packet::Snapshot { tick: self.tick, entities: chunk.to_vec() }.encode();
-            for addr in self.clients.keys() {
+            for (addr, id) in &self.clients {
+                let ack = self.acked.get(id).copied().unwrap_or(0);
+                let data = Packet::Snapshot { tick: self.tick, ack, entities: chunk.to_vec() }.encode();
                 let _ = self.socket.send_to(&data, addr);
             }
         }
@@ -332,6 +347,8 @@ pub struct Client {
     socket: UdpSocket,
     pub client_id: Option<u32>,
     pub last_tick: u32,
+    /// Last input the server reported as applied.
+    pub ack: u32,
     /// Latest known state of every entity, by id.
     pub entities: HashMap<u32, EntityState>,
     seq: u32,
@@ -346,7 +363,7 @@ impl Client {
         socket.connect(server)?;
         socket.set_nonblocking(true)?;
         socket.send(&Packet::Connect { name: name.to_string() }.encode())?;
-        Ok(Self { socket, client_id: None, last_tick: 0, entities: HashMap::new(), seq: 0, out: Outbox::default(), inbox: Inbox::default(), rpcs: Vec::new() })
+        Ok(Self { socket, client_id: None, last_tick: 0, ack: 0, entities: HashMap::new(), seq: 0, out: Outbox::default(), inbox: Inbox::default(), rpcs: Vec::new() })
     }
 
     /// Re-send the handshake (call periodically until [`Client::client_id`] is set).
@@ -354,9 +371,11 @@ impl Client {
         let _ = self.socket.send(&Packet::Connect { name: name.to_string() }.encode());
     }
 
-    pub fn send_input(&mut self, movement: [f32; 2], yaw: f32, pitch: f32, buttons: u32) {
+    /// Send one input; returns its number.
+    pub fn send_input(&mut self, movement: [f32; 2], yaw: f32, pitch: f32, buttons: u32, dt: f32) -> u32 {
         self.seq += 1;
-        let _ = self.socket.send(&Packet::Input { seq: self.seq, movement, yaw, pitch, buttons }.encode());
+        let _ = self.socket.send(&Packet::Input { seq: self.seq, movement, yaw, pitch, buttons, dt }.encode());
+        self.seq
     }
 
     pub fn disconnect(&self) {
@@ -376,8 +395,9 @@ impl Client {
                     }
                 }
                 Ok(Packet::RpcAck { id }) => self.out.ack(id),
-                Ok(Packet::Snapshot { tick, entities }) if tick >= self.last_tick => {
+                Ok(Packet::Snapshot { tick, ack, entities }) if tick >= self.last_tick => {
                     self.last_tick = tick;
+                    self.ack = self.ack.max(ack);
                     for e in entities {
                         self.entities.insert(e.id, e);
                     }
@@ -424,13 +444,67 @@ mod tests {
         let packets = [
             Packet::Connect { name: "Ünï".into() },
             Packet::Accepted { client_id: 7 },
-            Packet::Input { seq: 9, movement: [1.0, -0.5], yaw: 90.0, pitch: -10.0, buttons: 3 },
-            Packet::Snapshot { tick: 4, entities: vec![EntityState { id: 1, position: [1.0, 2.0, 3.0], rotation: [0.0, 0.0, 0.0, 1.0] }] },
+            Packet::Input { seq: 9, movement: [1.0, -0.5], yaw: 90.0, pitch: -10.0, buttons: 3, dt: 0.016 },
+            Packet::Snapshot { tick: 4, ack: 2, entities: vec![EntityState { id: 1, position: [1.0, 2.0, 3.0], rotation: [0.0, 0.0, 0.0, 1.0] }] },
             Packet::Disconnect,
         ];
         for p in packets {
             assert_eq!(Packet::decode(&p.encode()).unwrap(), p);
         }
+    }
+
+    #[test]
+    fn prediction_replays_unacknowledged_inputs_on_the_server_state() {
+        use super::replication::{Prediction, PLAYER_ID_BASE};
+        use sbox_math::Vec3;
+        let mut server = Server::bind("127.0.0.1:0").unwrap();
+        let mut client = Client::connect(&server.local_addr().unwrap().to_string(), "c").unwrap();
+        assert!(wait(|| {
+            server.poll();
+            client.poll();
+            client.client_id.is_some()
+        }));
+        let own = PLAYER_ID_BASE + client.client_id.unwrap();
+        let mut pred = Prediction::default();
+        assert_eq!(pred.step(&mut client, [1.0, 0.0], 0.0, 0.0, 0, 0.1), None, "the server has not reported us yet");
+        // The server has applied input 1 and put the player at x = 20 (not the 25 the client expected).
+        client.entities.insert(own, EntityState { id: own, position: [20.0, 0.0, 5.0], rotation: [0.0, 0.0, 0.0, 1.0] });
+        client.ack = 1;
+        // Inputs 2 and 3 are still in flight: replayed on top of the corrected position.
+        let p2 = pred.step(&mut client, [1.0, 0.0], 0.0, 0.0, 0, 0.1).unwrap();
+        let p3 = pred.step(&mut client, [1.0, 0.0], 0.0, 0.0, 0, 0.1).unwrap();
+        assert!((p2 - Vec3::new(45.0, 0.0, 5.0)).length() < 1e-3, "{p2:?}");
+        assert!((p3 - Vec3::new(70.0, 0.0, 5.0)).length() < 1e-3, "{p3:?}");
+        assert_eq!(pred.pending(), 2);
+        // The server catches up to input 3: nothing left to replay.
+        client.entities.insert(own, EntityState { id: own, position: [71.0, 0.0, 5.0], rotation: [0.0, 0.0, 0.0, 1.0] });
+        client.ack = 3;
+        let p = pred.position(&client).unwrap();
+        assert!((p - Vec3::new(71.0, 0.0, 5.0)).length() < 1e-3);
+        assert_eq!(pred.pending(), 0);
+    }
+
+    #[test]
+    fn the_server_acknowledges_applied_inputs_in_snapshots() {
+        let mut server = Server::bind("127.0.0.1:0").unwrap();
+        let mut client = Client::connect(&server.local_addr().unwrap().to_string(), "c").unwrap();
+        assert!(wait(|| {
+            server.poll();
+            client.poll();
+            client.client_id.is_some()
+        }));
+        for _ in 0..3 {
+            client.send_input([0.0, 0.0], 0.0, 0.0, 0, 0.016);
+        }
+        assert!(wait(|| {
+            server.poll();
+            server.acked.get(&1) == Some(&3)
+        }));
+        server.broadcast(&[]);
+        assert!(wait(|| {
+            client.poll();
+            client.ack == 3
+        }));
     }
 
     #[test]
@@ -532,7 +606,7 @@ mod tests {
         }));
         assert_eq!(events, vec![ServerEvent::Connected { client_id: 1, name: "tester".into() }]);
 
-        client.send_input([1.0, 0.0], 45.0, 0.0, 1);
+        client.send_input([1.0, 0.0], 45.0, 0.0, 1, 0.016);
         assert!(wait(|| {
             events.extend(server.poll());
             events.iter().any(|e| matches!(e, ServerEvent::Input { seq: 1, .. }))
@@ -559,7 +633,7 @@ mod tests {
     fn unknown_senders_cannot_inject_input() {
         let mut server = Server::bind("127.0.0.1:0").unwrap();
         let stranger = UdpSocket::bind("127.0.0.1:0").unwrap();
-        stranger.send_to(&Packet::Input { seq: 1, movement: [1.0, 1.0], yaw: 0.0, pitch: 0.0, buttons: 0 }.encode(), server.local_addr().unwrap()).unwrap();
+        stranger.send_to(&Packet::Input { seq: 1, movement: [1.0, 1.0], yaw: 0.0, pitch: 0.0, buttons: 0, dt: 0.016 }.encode(), server.local_addr().unwrap()).unwrap();
         std::thread::sleep(Duration::from_millis(50));
         assert!(server.poll().is_empty());
     }
@@ -596,16 +670,23 @@ pub mod replication {
     /// Walking speed of a remote player in units per second.
     pub const PLAYER_SPEED: f32 = 250.0;
 
-    /// Host-side objects of the connected clients. Players are moved kinematically from their input: no collision,
-    /// gravity or jumping, so they glide at a fixed height.
+    /// One movement step of a player: `movement` is (forward, left) in -1..1, `yaw` in degrees. The server and the
+    /// client's prediction both use this, so they agree exactly.
+    pub fn move_step(position: Vec3, movement: [f32; 2], yaw: f32, dt: f32) -> Vec3 {
+        let (sin, cos) = yaw.to_radians().sin_cos();
+        let wish = Vec3::new(cos, sin, 0.0) * movement[0] + Vec3::new(-sin, cos, 0.0) * movement[1];
+        position + wish.clamp_length_max(1.0) * PLAYER_SPEED * dt
+    }
+
+    /// Host-side objects of the connected clients. Every received input is applied once, kinematically: no collision,
+    /// gravity or jumping, so players glide at a fixed height.
     #[derive(Default)]
     pub struct RemotePlayers {
         objects: HashMap<u32, GoId>,
-        input: HashMap<u32, ([f32; 2], f32)>,
     }
 
     impl RemotePlayers {
-        /// Create / remove player objects and remember each client's latest input.
+        /// Create / remove player objects and apply each client's inputs.
         pub fn handle(&mut self, scene: &mut Scene, event: &ServerEvent, spawn: Vec3) {
             match event {
                 ServerEvent::Connected { client_id, name } => {
@@ -614,13 +695,18 @@ pub mod replication {
                     scene.add_component(go, NetworkId(PLAYER_ID_BASE + client_id));
                     self.objects.insert(*client_id, go);
                 }
-                ServerEvent::Input { client_id, movement, yaw, .. } => {
-                    self.input.insert(*client_id, (*movement, *yaw));
+                ServerEvent::Input { client_id, movement, yaw, dt, .. } => {
+                    if let Some(&go) = self.objects.get(client_id) {
+                        let mut t = scene.world_transform(go);
+                        // Clamp the frame time so a client cannot move faster by claiming long frames.
+                        t.position = move_step(t.position, *movement, *yaw, dt.clamp(0.0, 0.25));
+                        t.rotation = Angles::new(0.0, *yaw, 0.0).to_rotation();
+                        scene.set_world_transform(go, t);
+                    }
                 }
                 // Calls are for the game to interpret.
                 ServerEvent::Rpc { .. } => {}
                 ServerEvent::Disconnected { client_id } => {
-                    self.input.remove(client_id);
                     if let Some(go) = self.objects.remove(client_id) {
                         scene.destroy_object(go);
                     }
@@ -628,21 +714,38 @@ pub mod replication {
             }
         }
 
-        /// Advance every player by its last input. `movement` is (forward, left), `yaw` in degrees.
-        pub fn step(&self, scene: &mut Scene, dt: f32) {
-            for (id, go) in &self.objects {
-                let Some(&(m, yaw)) = self.input.get(id) else { continue };
-                let (sin, cos) = yaw.to_radians().sin_cos();
-                let wish = Vec3::new(cos, sin, 0.0) * m[0] + Vec3::new(-sin, cos, 0.0) * m[1];
-                let mut t = scene.world_transform(*go);
-                t.position += wish.clamp_length_max(1.0) * PLAYER_SPEED * dt;
-                t.rotation = Angles::new(0.0, yaw, 0.0).to_rotation();
-                scene.set_world_transform(*go, t);
-            }
-        }
-
         pub fn object(&self, client_id: u32) -> Option<GoId> {
             self.objects.get(&client_id).copied()
+        }
+    }
+
+    /// Client-side prediction of the local player: inputs are applied at once with [`move_step`] and, when the server
+    /// reports a position, replayed on top of it (the server's answer wins for everything it has already applied).
+    #[derive(Default)]
+    pub struct Prediction {
+        pending: std::collections::VecDeque<(u32, [f32; 2], f32, f32)>,
+    }
+
+    impl Prediction {
+        /// Send an input and return where the local player is expected to be now. `None` until the server has
+        /// reported the player once.
+        pub fn step(&mut self, client: &mut Client, movement: [f32; 2], yaw: f32, pitch: f32, buttons: u32, dt: f32) -> Option<Vec3> {
+            let seq = client.send_input(movement, yaw, pitch, buttons, dt);
+            self.pending.push_back((seq, movement, yaw, dt.clamp(0.0, 0.25)));
+            self.position(client)
+        }
+
+        /// Server state of the local player with the not yet acknowledged inputs replayed.
+        pub fn position(&mut self, client: &Client) -> Option<Vec3> {
+            while self.pending.front().is_some_and(|(seq, ..)| *seq <= client.ack) {
+                self.pending.pop_front();
+            }
+            let own = client.entities.get(&(PLAYER_ID_BASE + client.client_id?))?;
+            Some(self.pending.iter().fold(Vec3::from(own.position), |p, (_, m, yaw, dt)| move_step(p, *m, *yaw, *dt)))
+        }
+
+        pub fn pending(&self) -> usize {
+            self.pending.len()
         }
     }
 
@@ -666,6 +769,11 @@ pub mod replication {
     /// Move networked objects towards the client's latest state. `blend` is the fraction of the remaining distance covered
     /// (1.0 snaps; smaller values smooth between the snapshots). Ids the client has no state for are left alone.
     pub fn apply(scene: &mut Scene, client: &Client, blend: f32) {
+        apply_except(scene, client, blend, None);
+    }
+
+    /// Like [`apply`], but leaves the object with id `skip` alone (the locally predicted player).
+    pub fn apply_except(scene: &mut Scene, client: &Client, blend: f32, skip: Option<u32>) {
         // Players are not part of the loaded scene: create an object for each one the server reports.
         let known: Vec<u32> = scene.iter_components::<NetworkId>().map(|(_, n)| n.0).collect();
         let mut missing: Vec<&EntityState> = client.entities.values().filter(|e| e.id >= PLAYER_ID_BASE && !known.contains(&e.id)).collect();
@@ -675,7 +783,7 @@ pub mod replication {
             scene.set_world_transform(go, Transform::from_position(Vec3::from(e.position)));
             scene.add_component(go, NetworkId(e.id));
         }
-        let targets: Vec<_> = scene.iter_components::<NetworkId>().filter_map(|(go, n)| client.entities.get(&n.0).map(|e| (go, e.clone()))).collect();
+        let targets: Vec<_> = scene.iter_components::<NetworkId>().filter(|(_, n)| Some(n.0) != skip).filter_map(|(go, n)| client.entities.get(&n.0).map(|e| (go, e.clone()))).collect();
         for (go, e) in targets {
             let cur = scene.world_transform(go);
             let goal = Transform::new(Vec3::from(e.position), Quat::from_array(e.rotation).normalize(), cur.scale);
@@ -694,16 +802,22 @@ pub mod replication {
             let mut players = RemotePlayers::default();
             players.handle(&mut scene, &ServerEvent::Connected { client_id: 2, name: "bob".into() }, Vec3::new(0.0, 0.0, 10.0));
             let go = players.object(2).unwrap();
-            // Walk forward along +Y (yaw 90 degrees) for one second.
-            players.handle(&mut scene, &ServerEvent::Input { client_id: 2, seq: 1, movement: [1.0, 0.0], yaw: 90.0, pitch: 0.0, buttons: 0 }, Vec3::ZERO);
-            players.step(&mut scene, 1.0);
+            // Walk forward along +Y (yaw 90 degrees) for one second, in ten inputs.
+            players.handle(&mut scene, &ServerEvent::Input { client_id: 2, seq: 1, movement: [1.0, 0.0], yaw: 90.0, pitch: 0.0, buttons: 0, dt: 0.1 }, Vec3::ZERO);
+            for _ in 0..9 {
+                players.handle(&mut scene, &ServerEvent::Input { client_id: 2, seq: 1, movement: [1.0, 0.0], yaw: 90.0, pitch: 0.0, buttons: 0, dt: 0.1 }, Vec3::ZERO);
+            }
             let p = scene.world_transform(go).position;
             assert!((p - Vec3::new(0.0, PLAYER_SPEED, 10.0)).length() < 0.01, "{p:?}");
             // Diagonal input is not faster than straight input.
-            players.handle(&mut scene, &ServerEvent::Input { client_id: 2, seq: 2, movement: [1.0, 1.0], yaw: 0.0, pitch: 0.0, buttons: 0 }, Vec3::ZERO);
-            players.step(&mut scene, 1.0);
+            players.handle(&mut scene, &ServerEvent::Input { client_id: 2, seq: 2, movement: [1.0, 1.0], yaw: 0.0, pitch: 0.0, buttons: 0, dt: 0.25 }, Vec3::ZERO);
             let q = scene.world_transform(go).position;
-            assert!(((q - p).length() - PLAYER_SPEED).abs() < 0.01);
+            assert!(((q - p).length() - PLAYER_SPEED * 0.25).abs() < 0.01);
+            // A claimed frame time above 0.25 s is clamped, so long frames do not speed a player up.
+            players.handle(&mut scene, &ServerEvent::Input { client_id: 2, seq: 3, movement: [1.0, 0.0], yaw: 0.0, pitch: 0.0, buttons: 0, dt: 100.0 }, Vec3::ZERO);
+            let q2 = scene.world_transform(go).position;
+            assert!(((q2 - q).length() - PLAYER_SPEED * 0.25).abs() < 0.01);
+            let q = q2;
 
             // A client that never loaded the player gets an object for it.
             let mut server = Server::bind("127.0.0.1:0").unwrap();
