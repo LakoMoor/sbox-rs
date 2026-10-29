@@ -50,7 +50,7 @@ Checked on the `game/` directory produced by the official `Setup` step:
 - `SpotLight` is a real cone light (smoothstep between inner and outer angle; no shadows; shares the 8-slot point light array)
 - Maps: world nodes (`vwrld_c` / `vwnod_c`) are loaded with `--map <maps/x/world.vwrld_c> --game <game dir>`; map entities (`vents_c`), lightmaps and visibility are ignored
 - Prefab instances/variables, most scene component types (only models, lights, camera, rigidbody and colliders are mapped)
-- Scripting: s&box game code is C#; it needs either a Rust API or an embedded .NET runtime
+- Scripting: game code is written as Rust components (see [Scripting](#scripting)); C# is not executed
 
 ## Build and run
 
@@ -102,6 +102,27 @@ Renders one frame off-screen and writes a PNG.
 cargo run --release -p sbox-resource --example survey -- path/to/game
 ```
 
+## Scripting
+
+Decision (the less invasive of the two options in the original plan): game code is ported to Rust and plugged in as components. An embedded .NET runtime is not planned for now; nothing in the scene API prevents adding one later.
+
+A component implements `sbox_scene::Component` with the s&box lifecycle (`on_awake`, `on_enabled`, `on_start`, `on_update`, `on_fixed_update`, `on_pre_render`, `on_disabled`, `on_destroy`) and reads shared state from resources such as `Input`:
+
+```rust
+struct Spinner { speed: f32 }
+
+impl Component for Spinner {
+    fn on_update(&mut self, scene: &mut Scene, h: Handle) {
+        let mut t = scene.local_transform(h.go);
+        t.rotation = Quat::from_rotation_z((self.speed * scene.delta).to_radians()) * t.rotation;
+        scene.set_local_transform(h.go, t);
+    }
+    impl_component_any!();
+}
+```
+
+To instantiate one from a `.scene` / `.prefab` file, map its `__type` name in `SceneLoader::create` (`crates/sbox-app/src/assets.rs`), as `CubeController` (a port of the sweeper sample's `CubeController.cs`) is. Unmapped types are counted and listed in the log as "unsupported components".
+
 ## Roadmap
 
 Done (see "Not done yet" for the approximations): scene / prefab loading, maps from VPK (world nodes), models with external meshes, materials with the common `F_*` flags, animation graphs (reduced), particles, sounds, input + a basic character controller, a post-processing chain (tone mapping, bloom, vignette, sharpen, depth of field, SSAO, chromatic aberration, gradient fog), a screen-space UI overlay, `MeshComponent` / `Decal` / `SpotLight` / `ModelCollider`.
@@ -113,7 +134,7 @@ Open, in rough order of value:
 3. A real UI layer (panels, layout, input routing) behind `ScreenPanel` / `WorldPanel`
 4. Real shader translation: `.shader_c` is compiled GPU bytecode, so this means re-implementing the shaders by hand per material family
 5. Networking (needs a design decision)
-6. Scripting story for game code: a Rust API or an embedded .NET runtime (needs a design decision)
+6. Scripting: Rust components are the supported path; an embedded .NET runtime would be needed to run original C# unchanged
 
 ## License
 
