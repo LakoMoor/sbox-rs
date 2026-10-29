@@ -4,6 +4,7 @@ mod game;
 mod meshcomp;
 mod particles;
 mod text;
+mod ui;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -90,6 +91,9 @@ struct App {
     camera: Option<sbox_scene::GoId>,
     last: Instant,
     audio: Option<audio::Audio>,
+    ui: Option<ui::Ui>,
+    /// Cursor position in physical pixels.
+    cursor: (f32, f32),
 }
 
 impl App {
@@ -139,20 +143,53 @@ impl App {
 }
 
 impl App {
-    /// Draw a text label in the top-left corner as a screen-space overlay (`--hud "text"`).
-    /// The font comes from the `game/` directory found in any path argument.
-    fn add_hud(r: &mut Renderer, args: &[String], text: &str) {
-        let game = args.iter().flat_map(|a| std::path::Path::new(a).ancestors().map(std::path::Path::to_path_buf).collect::<Vec<_>>()).find(|p| p.file_name().is_some_and(|n| n == "game"));
-        let fs = game.map(sbox_resource::vmat::GameFs::from_game_dir);
-        let font = fs.as_ref().and_then(|fs| text::font_files("Poppins", 600, false).iter().find_map(|p| fs.read_raw(p))).and_then(|d| ab_glyph::FontVec::try_from_vec(d).ok());
-        let Some(font) = font else {
-            log::warn!("--hud: no font found (pass a path inside the game directory)");
-            return;
+    /// The UI font (Poppins) from the `game/` directory found in any path argument.
+    fn load_ui_font(args: &[String]) -> Option<ab_glyph::FontVec> {
+        let game = args.iter().flat_map(|a| std::path::Path::new(a).ancestors().map(std::path::Path::to_path_buf).collect::<Vec<_>>()).find(|p| p.file_name().is_some_and(|n| n == "game"))?;
+        let fs = sbox_resource::vmat::GameFs::from_game_dir(game);
+        text::font_files("Poppins", 600, false).iter().find_map(|p| fs.read_raw(p)).and_then(|d| ab_glyph::FontVec::try_from_vec(d).ok())
+    }
+
+    /// Rasterise `text` into a texture; returns it with its pixel size.
+    fn text_texture(r: &mut Renderer, font: &ab_glyph::FontVec, text: &str, size: f32) -> (sbox_render::TextureId, [f32; 2]) {
+        let st = text::TextStyle { text: text.to_string(), color: [1.0; 4], font: "Poppins".into(), size, weight: 600, italic: false, line_height: 1.0, align: -1, scale: 1.0 };
+        let (img, w, h) = text::rasterise(font, &st);
+        // `rasterise` supersamples by 4x; the on-screen size is a quarter of the texture.
+        (r.upload_rgba8(&img, w, h, true), [w as f32 * 0.25, h as f32 * 0.25])
+    }
+
+    /// `--hud "text"` shows a label in the top-left corner; `--ui-demo` adds a panel with Play / Quit buttons.
+    fn build_ui(r: &mut Renderer, args: &[String]) -> Option<ui::Ui> {
+        let hud = args.iter().position(|a| a == "--hud").map(|i| args.get(i + 1).map_or("sbox-rs", String::as_str));
+        let demo = args.iter().any(|a| a == "--ui-demo");
+        if hud.is_none() && !demo {
+            return None;
+        }
+        let Some(font) = Self::load_ui_font(args) else {
+            log::warn!("UI: no font found (pass a path inside the game directory)");
+            return None;
         };
-        let st = text::TextStyle { text: text.to_string(), color: [1.0; 4], font: "Poppins".into(), size: 28.0, weight: 600, italic: false, line_height: 1.0, align: -1, scale: 1.0 };
-        let (img, w, h) = text::rasterise(&font, &st);
-        let tex = r.upload_rgba8(&img, w, h, true);
-        r.overlay.push(sbox_render::UiRect { texture: tex, rect: [16.0, 16.0, w as f32, h as f32], tint: [1.0; 4] });
+        let white = r.upload_rgba8(&[255; 4], 1, 1, true);
+        let mut ui = ui::Ui::new(white);
+        if let Some(text) = hud {
+            let (texture, [w, h]) = Self::text_texture(r, &font, text, 28.0);
+            ui.labels.push(ui::Label { texture, rect: [16.0, 16.0, w, h] });
+        }
+        if demo {
+            ui.panels.push(ui::Panel { rect: [440.0, 220.0, 400.0, 280.0], color: [0.05, 0.06, 0.1, 0.85] });
+            let (title, [tw, th]) = Self::text_texture(r, &font, "sbox-rs", 40.0);
+            ui.labels.push(ui::Label { texture: title, rect: [640.0 - tw * 0.5, 245.0, tw, th] });
+            for (i, (id, label)) in [("play", "Play"), ("quit", "Quit")].into_iter().enumerate() {
+                ui.buttons.push(ui::Button {
+                    id: id.into(),
+                    rect: [480.0, 330.0 + i as f32 * 80.0, 320.0, 56.0],
+                    color: [0.18, 0.2, 0.3, 1.0],
+                    hover_color: [0.3, 0.4, 0.7, 1.0],
+                    label: Some(Self::text_texture(r, &font, label, 28.0)),
+                });
+            }
+        }
+        Some(ui)
     }
 
     /// Load a compiled map: `--map maps/dev/preview_flat/world.vwrld_c --game <game dir>`.
@@ -298,8 +335,9 @@ impl ApplicationHandler for App {
         let args: Vec<String> = std::env::args().skip(1).collect();
         let model = args.iter().find(|a| !a.starts_with("--") && a.ends_with(".vmdl_c")).cloned();
         self.camera = Some(Self::build_scene(&mut self.scene, &mut renderer, model.as_deref(), args.iter().position(|a| a == "--anim").and_then(|i| args.get(i + 1)).map(String::as_str), args.iter().position(|a| a == "--scene").and_then(|i| args.get(i + 1)).map(String::as_str)));
-        if let Some(i) = args.iter().position(|a| a == "--hud") {
-            Self::add_hud(&mut renderer, &args, args.get(i + 1).map_or("sbox-rs", String::as_str));
+        self.ui = Self::build_ui(&mut renderer, &args);
+        if let Some(ui) = &self.ui {
+            renderer.overlay = ui.rects();
         }
         if let Some(i) = args.iter().position(|a| a == "--screenshot") {
             let out = args.get(i + 1).expect("--screenshot <file.png>");
@@ -359,6 +397,13 @@ impl ApplicationHandler for App {
     fn window_event(&mut self, el: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => el.exit(),
+            WindowEvent::CursorMoved { position, .. } => {
+                self.cursor = (position.x as f32, position.y as f32);
+                if let (Some(ui), Some(r)) = (&mut self.ui, &mut self.renderer) {
+                    ui.set_mouse(self.cursor.0, self.cursor.1);
+                    r.overlay = ui.rects();
+                }
+            }
             WindowEvent::Resized(s) => {
                 if let Some(r) = &mut self.renderer {
                     r.resize(s.width, s.height);
@@ -426,6 +471,13 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
+                if let Some(id) = self.ui.as_ref().and_then(|ui| ui.click(self.cursor.0, self.cursor.1)) {
+                    log::info!("ui: clicked {id}");
+                    if id == "quit" {
+                        el.exit();
+                    }
+                    return;
+                }
                 if let (Some(w), Some(input)) = (&self.window, self.scene.resource_mut::<Input>()) {
                     input.set("Attack1", true);
                     if std::env::args().any(|a| a == "--play") {
@@ -462,7 +514,7 @@ fn main() -> anyhow::Result<()> {
     env_logger::init();
     let el = EventLoop::new()?;
     el.set_control_flow(ControlFlow::Poll);
-    let mut app = App { window: None, renderer: None, scene: Scene::new(), camera: None, last: Instant::now(), audio: None };
+    let mut app = App { window: None, renderer: None, scene: Scene::new(), camera: None, last: Instant::now(), audio: None, ui: None, cursor: (0.0, 0.0) };
     el.run_app(&mut app)?;
     Ok(())
 }

@@ -104,6 +104,7 @@ struct PostUniform {
 pub struct UiRect {
     pub texture: TextureId,
     pub rect: [f32; 4],
+    /// Multiplied with the texture; rgb in sRGB.
     pub tint: [f32; 4],
 }
 
@@ -1234,7 +1235,8 @@ impl Renderer {
                 let [x, y, w, h] = u.rect;
                 let (x0, x1) = (x / sw * 2.0 - 1.0, (x + w) / sw * 2.0 - 1.0);
                 let (y0, y1) = (1.0 - y / sh * 2.0, 1.0 - (y + h) / sh * 2.0);
-                let c = u.tint;
+                // Tints are authored in sRGB; the target is an sRGB surface, so blend in linear space.
+                let c = [srgb_to_linear(u.tint[0]), srgb_to_linear(u.tint[1]), srgb_to_linear(u.tint[2]), u.tint[3]];
                 for (px, py, uu, vv) in [(x0, y0, 0.0, 0.0), (x1, y0, 1.0, 0.0), (x1, y1, 1.0, 1.0), (x0, y0, 0.0, 0.0), (x1, y1, 1.0, 1.0), (x0, y1, 0.0, 1.0)] {
                     ui_verts.extend([px, py, uu, vv, c[0], c[1], c[2], c[3]]);
                 }
