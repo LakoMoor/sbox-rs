@@ -104,7 +104,7 @@ struct App {
 
 /// `--host <addr>` serves the physics props to clients; `--join <addr>` mirrors a server's props.
 enum Net {
-    Host(sbox_net::Server),
+    Host(sbox_net::Server, sbox_net::replication::RemotePlayers),
     Join(sbox_net::Client, Instant),
 }
 
@@ -243,7 +243,7 @@ impl App {
             match sbox_net::Server::bind(&addr) {
                 Ok(s) => {
                     log::info!("hosting on {}", s.local_addr().map(|a| a.to_string()).unwrap_or(addr));
-                    return Some(Net::Host(s));
+                    return Some(Net::Host(s, Default::default()));
                 }
                 Err(e) => log::error!("--host {addr}: {e:#}"),
             }
@@ -261,12 +261,17 @@ impl App {
     }
 
     /// Per-frame networking: the host handles clients and broadcasts props, a client applies the latest snapshot.
-    fn pump_net(&mut self) {
+    fn pump_net(&mut self, dt: f32) {
+        let spawn = self.camera.map_or(Vec3::Z * 64.0, |c| self.scene.world_transform(c).position);
         match &mut self.net {
-            Some(Net::Host(server)) => {
+            Some(Net::Host(server, players)) => {
                 for e in server.poll() {
-                    log::info!("net: {e:?}");
+                    if !matches!(e, sbox_net::ServerEvent::Input { .. }) {
+                        log::info!("net: {e:?}");
+                    }
+                    players.handle(&mut self.scene, &e, spawn);
                 }
+                players.step(&mut self.scene, dt);
                 server.broadcast(&sbox_net::replication::collect(&self.scene));
             }
             Some(Net::Join(client, last_try)) => {
@@ -274,6 +279,11 @@ impl App {
                 if client.client_id.is_none() && last_try.elapsed().as_secs_f32() > 0.5 {
                     client.retry_connect("player");
                     *last_try = Instant::now();
+                } else if client.client_id.is_some() {
+                    // Movement from the key actions and the look direction of the local camera.
+                    let input = self.scene.resource::<Input>().cloned().unwrap_or_default();
+                    let yaw = self.camera.map_or(0.0, |c| self.scene.world_transform(c).rotation.angles().yaw);
+                    client.send_input([input.axis("Forward", "Backward"), input.axis("Left", "Right")], yaw, 0.0, 0);
                 }
                 sbox_net::replication::apply(&mut self.scene, client, 0.3);
             }
@@ -637,7 +647,7 @@ impl ApplicationHandler for App {
                 let dt = (now - self.last).as_secs_f32().min(0.1);
                 self.last = now;
                 self.scene.tick(dt);
-                self.pump_net();
+                self.pump_net(dt);
                 if let Some(r) = &mut self.renderer {
                     if let Err(e) = r.render(&self.scene) {
                         log::error!("render: {e:#}");

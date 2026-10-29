@@ -370,9 +370,63 @@ mod tests {
 /// Scene replication: objects carrying a [`NetworkId`] have their world transform sent by the server and applied on the
 /// client, which must have loaded the same scene (objects are matched by id, not spawned).
 pub mod replication {
-    use super::{Client, EntityState};
-    use sbox_math::{Quat, Transform, Vec3};
-    use sbox_scene::{impl_component_any, Component, Scene};
+    use super::{Client, EntityState, ServerEvent};
+    use sbox_math::{Angles, Quat, Transform, Vec3};
+    use sbox_scene::{impl_component_any, Component, GoId, Scene};
+    use std::collections::HashMap;
+
+    /// Ids from here up belong to players (`PLAYER_ID_BASE + client id`); clients create a missing object for them.
+    pub const PLAYER_ID_BASE: u32 = 1_000_000;
+    /// Walking speed of a remote player in units per second.
+    pub const PLAYER_SPEED: f32 = 250.0;
+
+    /// Host-side objects of the connected clients. Players are moved kinematically from their input: no collision,
+    /// gravity or jumping, so they glide at a fixed height.
+    #[derive(Default)]
+    pub struct RemotePlayers {
+        objects: HashMap<u32, GoId>,
+        input: HashMap<u32, ([f32; 2], f32)>,
+    }
+
+    impl RemotePlayers {
+        /// Create / remove player objects and remember each client's latest input.
+        pub fn handle(&mut self, scene: &mut Scene, event: &ServerEvent, spawn: Vec3) {
+            match event {
+                ServerEvent::Connected { client_id, name } => {
+                    let go = scene.create_object(&format!("player {name}"));
+                    scene.set_world_transform(go, Transform::from_position(spawn));
+                    scene.add_component(go, NetworkId(PLAYER_ID_BASE + client_id));
+                    self.objects.insert(*client_id, go);
+                }
+                ServerEvent::Input { client_id, movement, yaw, .. } => {
+                    self.input.insert(*client_id, (*movement, *yaw));
+                }
+                ServerEvent::Disconnected { client_id } => {
+                    self.input.remove(client_id);
+                    if let Some(go) = self.objects.remove(client_id) {
+                        scene.destroy_object(go);
+                    }
+                }
+            }
+        }
+
+        /// Advance every player by its last input. `movement` is (forward, left), `yaw` in degrees.
+        pub fn step(&self, scene: &mut Scene, dt: f32) {
+            for (id, go) in &self.objects {
+                let Some(&(m, yaw)) = self.input.get(id) else { continue };
+                let (sin, cos) = yaw.to_radians().sin_cos();
+                let wish = Vec3::new(cos, sin, 0.0) * m[0] + Vec3::new(-sin, cos, 0.0) * m[1];
+                let mut t = scene.world_transform(*go);
+                t.position += wish.clamp_length_max(1.0) * PLAYER_SPEED * dt;
+                t.rotation = Angles::new(0.0, yaw, 0.0).to_rotation();
+                scene.set_world_transform(*go, t);
+            }
+        }
+
+        pub fn object(&self, client_id: u32) -> Option<GoId> {
+            self.objects.get(&client_id).copied()
+        }
+    }
 
     /// Marks an object as replicated; ids must be unique and identical on server and clients.
     pub struct NetworkId(pub u32);
@@ -394,6 +448,15 @@ pub mod replication {
     /// Move networked objects towards the client's latest state. `blend` is the fraction of the remaining distance covered
     /// (1.0 snaps; smaller values smooth between the snapshots). Ids the client has no state for are left alone.
     pub fn apply(scene: &mut Scene, client: &Client, blend: f32) {
+        // Players are not part of the loaded scene: create an object for each one the server reports.
+        let known: Vec<u32> = scene.iter_components::<NetworkId>().map(|(_, n)| n.0).collect();
+        let mut missing: Vec<&EntityState> = client.entities.values().filter(|e| e.id >= PLAYER_ID_BASE && !known.contains(&e.id)).collect();
+        missing.sort_by_key(|e| e.id);
+        for e in missing {
+            let go = scene.create_object("remote player");
+            scene.set_world_transform(go, Transform::from_position(Vec3::from(e.position)));
+            scene.add_component(go, NetworkId(e.id));
+        }
         let targets: Vec<_> = scene.iter_components::<NetworkId>().filter_map(|(go, n)| client.entities.get(&n.0).map(|e| (go, e.clone()))).collect();
         for (go, e) in targets {
             let cur = scene.world_transform(go);
@@ -406,6 +469,52 @@ pub mod replication {
     mod tests {
         use super::*;
         use crate::Server;
+
+        #[test]
+        fn players_follow_their_input_and_appear_on_other_clients() {
+            let mut scene = Scene::new();
+            let mut players = RemotePlayers::default();
+            players.handle(&mut scene, &ServerEvent::Connected { client_id: 2, name: "bob".into() }, Vec3::new(0.0, 0.0, 10.0));
+            let go = players.object(2).unwrap();
+            // Walk forward along +Y (yaw 90 degrees) for one second.
+            players.handle(&mut scene, &ServerEvent::Input { client_id: 2, seq: 1, movement: [1.0, 0.0], yaw: 90.0, pitch: 0.0, buttons: 0 }, Vec3::ZERO);
+            players.step(&mut scene, 1.0);
+            let p = scene.world_transform(go).position;
+            assert!((p - Vec3::new(0.0, PLAYER_SPEED, 10.0)).length() < 0.01, "{p:?}");
+            // Diagonal input is not faster than straight input.
+            players.handle(&mut scene, &ServerEvent::Input { client_id: 2, seq: 2, movement: [1.0, 1.0], yaw: 0.0, pitch: 0.0, buttons: 0 }, Vec3::ZERO);
+            players.step(&mut scene, 1.0);
+            let q = scene.world_transform(go).position;
+            assert!(((q - p).length() - PLAYER_SPEED).abs() < 0.01);
+
+            // A client that never loaded the player gets an object for it.
+            let mut server = Server::bind("127.0.0.1:0").unwrap();
+            let mut client = Client::connect(&server.local_addr().unwrap().to_string(), "viewer").unwrap();
+            for _ in 0..200 {
+                server.poll();
+                client.poll();
+                if client.client_id.is_some() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            server.broadcast(&collect(&scene));
+            for _ in 0..200 {
+                client.poll();
+                if !client.entities.is_empty() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            let mut client_scene = Scene::new();
+            apply(&mut client_scene, &client, 1.0);
+            let (go, _) = client_scene.iter_components::<NetworkId>().next().expect("player object created");
+            assert!((client_scene.world_transform(go).position - q).length() < 1e-3);
+
+            players.handle(&mut scene, &ServerEvent::Disconnected { client_id: 2 }, Vec3::ZERO);
+            scene.tick(0.0); // destruction is queued until the next tick
+            assert!(collect(&scene).is_empty(), "removed with the client");
+        }
 
         #[test]
         fn server_scene_state_reaches_the_client_scene() {
