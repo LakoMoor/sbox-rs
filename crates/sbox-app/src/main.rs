@@ -6,6 +6,7 @@ mod layout;
 mod meshcomp;
 #[allow(dead_code)]
 mod razor;
+mod razor_ui;
 mod particles;
 mod text;
 mod ui;
@@ -180,7 +181,8 @@ impl App {
     fn build_ui(r: &mut Renderer, args: &[String]) -> Option<(ui::Ui, ab_glyph::FontVec)> {
         let hud = args.iter().position(|a| a == "--hud").map(|i| args.get(i + 1).map_or("sbox-rs", String::as_str));
         let demo = args.iter().any(|a| a == "--ui-demo");
-        if hud.is_none() && !demo {
+        let razor = args.iter().position(|a| a == "--razor").and_then(|i| args.get(i + 1));
+        if hud.is_none() && !demo && razor.is_none() {
             return None;
         }
         let Some(font) = Self::load_ui_font(args) else {
@@ -192,6 +194,30 @@ impl App {
         if let Some(text) = hud {
             let (texture, [w, h]) = Self::text_texture(r, &font, text, 28.0);
             ui.labels.push(ui::Label { texture, rect: [16.0, 16.0, w, h] });
+        }
+        if let Some(path) = razor {
+            match std::fs::read_to_string(path).map_err(anyhow::Error::from).and_then(|src| razor::parse(&src)) {
+                Ok(doc) => {
+                    let (items, _) = razor_ui::layout(&doc, 40.0, 40.0, 520.0);
+                    for item in items {
+                        match item {
+                            razor_ui::Item::Panel { rect } => ui.panels.push(ui::Panel { rect, color: [0.05, 0.06, 0.1, 0.85] }),
+                            razor_ui::Item::Text { text, size, rect } => {
+                                let (texture, [w, h]) = Self::text_texture(r, &font, &text, size);
+                                ui.labels.push(ui::Label { texture, rect: [rect[0], rect[1], w, h] });
+                            }
+                            razor_ui::Item::Button { id, text, rect } => ui.buttons.push(ui::Button {
+                                id,
+                                rect,
+                                color: [0.18, 0.2, 0.3, 1.0],
+                                hover_color: [0.3, 0.4, 0.7, 1.0],
+                                label: Some(Self::text_texture(r, &font, &text, 24.0)),
+                            }),
+                        }
+                    }
+                }
+                Err(e) => log::error!("--razor {path}: {e:#}"),
+            }
         }
         if demo {
             // A 400x360 panel centred on a 1280x720 screen, laid out as a column: title, two buttons, a text field.
