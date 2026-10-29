@@ -300,7 +300,8 @@ impl ComponentLoader for SceneLoader<'_> {
                     sbox_scene::Tonemapping {
                         mode,
                         exposure_compensation: ev,
-                        auto_exposure: p.get("AutoExposureEnabled").and_then(Value::as_bool).unwrap_or(false),
+                        // Opt-in: the exposure range semantics are unverified against s&box, and enabling it visibly darkens scenes.
+                        auto_exposure: std::env::args().any(|a| a == "--auto-exposure") && p.get("AutoExposureEnabled").and_then(Value::as_bool).unwrap_or(false),
                         min_exposure: f("MinimumExposure", 0.25),
                         max_exposure: f("MaximumExposure", 1.0),
                     },
