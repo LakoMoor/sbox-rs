@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/sbox-math", "crates/sbox-scene", "crates/sbox-render", "crates/sbox-app", "crates/sbox-resource", "crates/sbox-physics"]
+members = ["crates/sbox-math", "crates/sbox-scene", "crates/sbox-render", "crates/sbox-app", "crates/sbox-resource", "crates/sbox-physics", "crates/sbox-net"]
 
 [workspace.package]
 version = "0.1.0"
@@ -22,3 +22,4 @@ sbox-scene = { path = "crates/sbox-scene" }
 sbox-render = { path = "crates/sbox-render" }
 sbox-resource = { path = "crates/sbox-resource" }
 sbox-physics = { path = "crates/sbox-physics" }
+sbox-net = { path = "crates/sbox-net" }

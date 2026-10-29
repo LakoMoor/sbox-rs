@@ -2355,6 +2355,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "sbox-net"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+]
+
+[[package]]
 name = "sbox-physics"
 version = "0.1.0"
 dependencies = [
