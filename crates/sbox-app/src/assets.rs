@@ -358,6 +358,14 @@ impl ComponentLoader for SceneLoader<'_> {
                 scene.add_component(go, Collider { shape: Shape::Sphere { center, radius }, is_trigger: trig });
                 true
             }
+            "ModelCollider" => {
+                // Approximation: the collision shape is the model's bounding box (the real one is a `vphys_c` hull set).
+                let Some(path) = p.get("Model").and_then(Value::as_str) else { return true };
+                let Some(m) = self.assets.load_model(self.r, path) else { return true };
+                let trig = p.get("IsTrigger").and_then(Value::as_bool).unwrap_or(false);
+                scene.add_component(go, Collider { shape: Shape::Box { center: (m.mins + m.maxs) * 0.5, size: m.maxs - m.mins }, is_trigger: trig });
+                true
+            }
             "PlaneCollider" => {
                 scene.add_component(go, Collider { shape: Shape::Plane, is_trigger: false });
                 true
