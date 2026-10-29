@@ -102,6 +102,7 @@ struct App {
     /// Cursor position in physical pixels.
     cursor: (f32, f32),
     net: Option<Net>,
+    mods: winit::keyboard::ModifiersState,
 }
 
 /// `--host <addr>` serves the physics props to clients; `--join <addr>` mirrors a server's props.
@@ -199,7 +200,8 @@ impl App {
         if let Some(path) = razor {
             match std::fs::read_to_string(path).map_err(anyhow::Error::from).and_then(|src| razor::parse(&src)) {
                 Ok(doc) => {
-                    let (items, _) = razor_ui::layout(&doc, 40.0, 40.0, 520.0);
+                    let (items, content) = razor_ui::layout(&doc, 40.0, 40.0, 520.0);
+                    ui.content_height = 40.0 + content + 40.0;
                     for item in items {
                         match item {
                             razor_ui::Item::Panel { rect, color } => ui.panels.push(ui::Panel { rect, color }),
@@ -248,6 +250,8 @@ impl App {
                 label: None,
                 caret: 0,
                 caret_x: 0.0,
+                anchor: None,
+                anchor_x: 0.0,
             });
         }
         Some((ui, font))
@@ -326,6 +330,13 @@ impl App {
             ui.fields[i].label = (!text.is_empty()).then(|| Self::text_texture(r, font, &text, 24.0));
             let prefix: String = text.chars().take(ui.fields[i].caret).collect();
             ui.fields[i].caret_x = if prefix.is_empty() { 0.0 } else { Self::text_texture_width(font, &prefix, 24.0) };
+            ui.fields[i].anchor_x = match ui.fields[i].anchor {
+                Some(a) => {
+                    let p: String = text.chars().take(a).collect();
+                    if p.is_empty() { 0.0 } else { Self::text_texture_width(font, &p, 24.0) }
+                }
+                None => 0.0,
+            };
         }
         r.overlay = ui.rects();
     }
@@ -539,6 +550,7 @@ impl ApplicationHandler for App {
     fn window_event(&mut self, el: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => el.exit(),
+            WindowEvent::ModifiersChanged(m) => self.mods = m.state(),
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = (position.x as f32, position.y as f32);
                 if let (Some(ui), Some(r)) = (&mut self.ui, &mut self.renderer) {
@@ -563,18 +575,25 @@ impl ApplicationHandler for App {
                         }
                         winit::keyboard::Key::Named(k @ (winit::keyboard::NamedKey::ArrowLeft | winit::keyboard::NamedKey::ArrowRight | winit::keyboard::NamedKey::Home | winit::keyboard::NamedKey::End)) => {
                             use winit::keyboard::NamedKey as K;
-                            ui.move_caret(match k {
-                                K::ArrowLeft => ui::CaretMove::Left,
-                                K::ArrowRight => ui::CaretMove::Right,
-                                K::Home => ui::CaretMove::Home,
-                                _ => ui::CaretMove::End,
-                            });
+                            ui.move_caret(
+                                match k {
+                                    K::ArrowLeft => ui::CaretMove::Left,
+                                    K::ArrowRight => ui::CaretMove::Right,
+                                    K::Home => ui::CaretMove::Home,
+                                    _ => ui::CaretMove::End,
+                                },
+                                self.mods.shift_key(),
+                            );
                         }
                         winit::keyboard::Key::Named(winit::keyboard::NamedKey::Enter | winit::keyboard::NamedKey::Escape) => {
                             if let Some((id, text)) = ui.submit() {
                                 log::info!("ui: {id} = {text:?}");
                             }
                         }
+                        winit::keyboard::Key::Character(c) if self.mods.control_key() && c.eq_ignore_ascii_case("a") => {
+                            ui.select_all();
+                        }
+                        _ if self.mods.control_key() => {}
                         _ => {
                             for c in event.text.as_deref().unwrap_or("").chars() {
                                 ui.type_char(c);
@@ -630,6 +649,13 @@ impl ApplicationHandler for App {
                     winit::event::MouseScrollDelta::LineDelta(_, y) => y,
                     winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32 / 40.0,
                 };
+                if let (Some(ui), Some(w)) = (&mut self.ui, &self.window) {
+                    ui.viewport_height = w.inner_size().height as f32;
+                    if ui.scroll_by(-notches * 40.0) {
+                        self.refresh_ui();
+                        return;
+                    }
+                }
                 if let Some(input) = self.scene.resource_mut::<Input>() {
                     input.mouse_wheel += notches;
                 }
@@ -694,7 +720,7 @@ fn main() -> anyhow::Result<()> {
     env_logger::init();
     let el = EventLoop::new()?;
     el.set_control_flow(ControlFlow::Poll);
-    let mut app = App { window: None, renderer: None, scene: Scene::new(), camera: None, last: Instant::now(), audio: None, ui: None, ui_font: None, cursor: (0.0, 0.0), net: None };
+    let mut app = App { window: None, renderer: None, scene: Scene::new(), camera: None, last: Instant::now(), audio: None, ui: None, ui_font: None, cursor: (0.0, 0.0), net: None, mods: Default::default() };
     el.run_app(&mut app)?;
     Ok(())
 }
