@@ -6,9 +6,9 @@ use std::time::Instant;
 use sbox_math::{Angles, Quat, RotationExt, Transform, Vec3};
 use assets::{Assets, SceneLoader};
 use sbox_render::{MeshData, Renderer};
-use sbox_scene::{impl_component_any, CameraComponent, Component, DirectionalLight, Handle, ModelRenderer, PointLight, Scene};
+use sbox_scene::{impl_component_any, CameraComponent, Component, DirectionalLight, Handle, Input, ModelRenderer, PointLight, Scene};
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, WindowEvent};
+use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
@@ -153,13 +153,26 @@ impl App {
             scene.add_component(c, CameraComponent::default());
             c
         });
-        scene.add_component(cam, FlyCamera::default());
+        scene.insert_resource(Input::default());
+        if std::env::args().any(|a| a == "--play") {
+            let eye = sbox_physics::PlayerController::default().eye_height;
+            let t = scene.world_transform(cam);
+            let player = scene.create_object("player");
+            scene.set_local_transform(player, Transform::from_position(t.position - Vec3::Z * eye));
+            let a = t.rotation.angles();
+            scene.add_component(
+                player,
+                sbox_physics::PlayerController { camera: Some(cam), yaw: a.yaw, pitch: a.pitch, ..Default::default() },
+            );
+        } else {
+            scene.add_component(cam, FlyCamera::default());
+        }
         cam
     }
 
     /// Show a single compiled model (`.vmdl_c`) with a camera framed on its bounds.
     fn build_model_scene(scene: &mut Scene, r: &mut Renderer, path: &str, anim_path: Option<&str>) -> sbox_scene::GoId {
-        use sbox_resource::{anim, model, vmat, vtex};
+        use sbox_resource::{anim, model, vmat};
         let bytes = std::fs::read(path).expect("read model");
         let md = model::load(&bytes).expect("load model");
         let meshes: Vec<_> = md.default_meshes().collect();
@@ -225,6 +238,10 @@ impl ApplicationHandler for App {
             for _ in 0..(secs * 60.0) as u32 {
                 self.scene.tick(1.0 / 60.0);
             }
+            if let Some(c) = self.camera {
+                let t = self.scene.world_transform(c);
+                log::info!("camera at {:?} angles {:?}", t.position, t.rotation.angles());
+            }
             let rgba = renderer.render_offscreen(&self.scene, w, h).expect("offscreen render");
             let file = std::io::BufWriter::new(std::fs::File::create(out).expect("create png"));
             let mut enc = png::Encoder::new(file, w, h);
@@ -240,6 +257,14 @@ impl ApplicationHandler for App {
         self.last = Instant::now();
     }
 
+    fn device_event(&mut self, _el: &ActiveEventLoop, _id: DeviceId, event: DeviceEvent) {
+        if let DeviceEvent::MouseMotion { delta } = event {
+            if let Some(input) = self.scene.resource_mut::<Input>() {
+                input.add_mouse(delta.0 as f32, delta.1 as f32);
+            }
+        }
+    }
+
     fn window_event(&mut self, el: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => el.exit(),
@@ -253,6 +278,18 @@ impl ApplicationHandler for App {
                 if let PhysicalKey::Code(code) = event.physical_key {
                     if code == KeyCode::Escape {
                         el.exit();
+                    }
+                    let action = match code {
+                        KeyCode::KeyW => Some("Forward"),
+                        KeyCode::KeyS => Some("Backward"),
+                        KeyCode::KeyA => Some("Left"),
+                        KeyCode::KeyD => Some("Right"),
+                        KeyCode::Space => Some("Jump"),
+                        KeyCode::ShiftLeft => Some("Run"),
+                        _ => None,
+                    };
+                    if let (Some(a), Some(input)) = (action, self.scene.resource_mut::<Input>()) {
+                        input.set(a, down);
                     }
                     let idx = match code {
                         KeyCode::KeyW => 0,
@@ -270,6 +307,18 @@ impl ApplicationHandler for App {
                     if let Some(cam) = self.camera {
                         if let Some(f) = self.scene.component_mut::<FlyCamera>(cam) {
                             f.keys[idx] = down;
+                        }
+                    }
+                }
+            }
+            WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
+                if let (Some(w), Some(input)) = (&self.window, self.scene.resource_mut::<Input>()) {
+                    if std::env::args().any(|a| a == "--play") {
+                        let ok = w.set_cursor_grab(winit::window::CursorGrabMode::Locked).is_ok()
+                            || w.set_cursor_grab(winit::window::CursorGrabMode::Confined).is_ok();
+                        if ok {
+                            w.set_cursor_visible(false);
+                            input.mouse_captured = true;
                         }
                     }
                 }

@@ -6,9 +6,11 @@
 //! Destruction is deferred until the end of the tick (see Scene.Deletes.cs).
 
 mod builtin;
+mod input;
 mod scene;
 mod serialize;
 
 pub use builtin::*;
+pub use input::Input;
 pub use scene::*;
 pub use serialize::*;

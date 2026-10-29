@@ -53,6 +53,8 @@ cargo run -p sbox-app --release
 
 Controls: WASD / QE to move, arrow keys to look, Esc to quit.
 
+Pass `--play` with `--scene` to replace the fly camera with a physics-driven first-person capsule controller (WASD, Shift to run, Space to jump, click to capture the mouse).
+
 ### Running with real assets
 
 1. Clone [sbox-public](https://github.com/Facepunch/sbox-public) and run its `Setup.bat` / `Setup.sh` (downloads the native binaries and compiled resources, ~10 GB).

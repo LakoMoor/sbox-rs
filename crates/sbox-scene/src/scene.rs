@@ -470,6 +470,9 @@ impl Scene {
         self.for_each_running(|c, s, h| c.on_update(s, h));
         self.for_each_running(|c, s, h| c.on_pre_render(s, h));
         self.flush_destroys();
+        if let Some(i) = self.resource_mut::<crate::Input>() {
+            i.end_frame();
+        }
     }
 
     fn run_pending_starts(&mut self) {
