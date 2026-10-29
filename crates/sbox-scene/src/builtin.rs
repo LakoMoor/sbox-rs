@@ -203,3 +203,20 @@ impl Default for DepthOfField {
 impl Component for DepthOfField {
     impl_component_any!();
 }
+
+/// Screen-space ambient occlusion computed from the depth buffer.
+pub struct AmbientOcclusion {
+    /// World-space sampling radius.
+    pub radius: f32,
+    pub intensity: f32,
+}
+
+impl Default for AmbientOcclusion {
+    fn default() -> Self {
+        Self { radius: 128.0, intensity: 1.0 }
+    }
+}
+
+impl Component for AmbientOcclusion {
+    impl_component_any!();
+}

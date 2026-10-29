@@ -3,7 +3,7 @@ use anyhow::{anyhow, Result};
 use bytemuck::{Pod, Zeroable};
 use sbox_math::{sbox_to_view, Mat4, RotationExt, Transform, Vec3};
 use sbox_resource::vtex::{TexFormat, Texture};
-use sbox_scene::{DepthOfField, Sharpen, TonemapMode, Tonemapping, Bloom, Vignette, CameraComponent, DirectionalLight, MaterialId, MeshId, ModelRenderer, PointLight, Scene, SpotLight};
+use sbox_scene::{AmbientOcclusion, DepthOfField, Sharpen, TonemapMode, Tonemapping, Bloom, Vignette, CameraComponent, DirectionalLight, MaterialId, MeshId, ModelRenderer, PointLight, Scene, SpotLight};
 use wgpu::util::DeviceExt;
 
 const MAX_POINT_LIGHTS: usize = 8;
@@ -88,6 +88,7 @@ struct PostUniform {
     fx: [f32; 4],
     dof: [f32; 4],
     cam: [f32; 4],
+    ao: [f32; 4],
 }
 
 /// A textured screen-space rectangle drawn over the finished frame (`rect` = x, y, width, height in pixels, origin top-left).
@@ -986,6 +987,7 @@ impl Renderer {
         self.ensure_hdr(size);
         let cam = scene.iter_components::<CameraComponent>().max_by_key(|(_, c)| c.priority);
         let (z_near, z_far) = cam.map_or((1.0, 1000.0), |(_, c)| (c.z_near, c.z_far));
+        let fov_y = cam.map_or(1.0, |(_, c)| c.fov_y(aspect));
         let (cam_xf, clear, view_proj) = match cam {
             Some((go, c)) => {
                 let xf = scene.world_transform(go);
@@ -1181,6 +1183,7 @@ impl Renderer {
             let bloom = scene.iter_components::<Bloom>().next().map(|(_, b)| b);
             let vig = scene.iter_components::<Vignette>().next().map(|(_, v)| v);
             let tm = scene.iter_components::<Tonemapping>().next().map(|(_, t)| t);
+            let ao = scene.iter_components::<AmbientOcclusion>().next().map(|(_, a)| a);
             let dof = scene.iter_components::<DepthOfField>().next().map(|(_, d)| d);
             let sharpen = scene.iter_components::<Sharpen>().next().map_or(0.0, |(_, s)| s.scale);
             let post = PostUniform {
@@ -1192,7 +1195,8 @@ impl Renderer {
                 extra: [vig.map_or(0.0, |v| v.roundness), aspect, 0.03, tm.map_or(0.0, |t| match t.mode { TonemapMode::Aces => 0.0, TonemapMode::AgX => 1.0, TonemapMode::Reinhard => 2.0 })],
                 fx: [sharpen, 1.0 / size.0 as f32, 1.0 / size.1 as f32, 0.0],
                 dof: dof.map_or([0.0; 4], |d| [d.focal_distance.max(1.0), d.focus_range, d.blur_size, d.back_blur as u32 as f32 + 2.0 * d.front_blur as u32 as f32]),
-                cam: [z_near, z_far, 0.0, 0.0],
+                cam: [z_near, z_far, (fov_y * 0.5).tan(), aspect],
+                ao: ao.map_or([0.0; 4], |a| [a.radius, a.intensity, 0.0, 0.0]),
             };
             self.queue.write_buffer(&self.post_buf, 0, bytemuck::bytes_of(&post));
             let mut ui_groups = Vec::new();

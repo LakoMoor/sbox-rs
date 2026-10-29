@@ -8,8 +8,9 @@ struct Post {
     fx: vec4<f32>,
     // x = focal distance (0 = depth of field off), y = focus range, z = max blur radius in pixels, w = blur flags (1 back, 2 front)
     dof: vec4<f32>,
-    // x = z near, y = z far
-    cam: vec4<f32>,
+    cam: vec4<f32>, // x = z near, y = z far, z = tan(fov_y / 2), w = aspect
+    // x = ssao radius (0 = off), y = ssao intensity
+    ao: vec4<f32>,
 };
 
 @group(0) @binding(0) var hdr_tex: texture_2d<f32>;
@@ -73,6 +74,42 @@ fn view_distance(d: f32) -> f32 {
     return post.cam.x * post.cam.y / (post.cam.y - d * (post.cam.y - post.cam.x));
 }
 
+// View-space position (x right, y up, z forward) of a pixel.
+fn view_pos(px: vec2<i32>, dims: vec2<f32>) -> vec3<f32> {
+    let z = view_distance(textureLoad(depth_tex, px, 0));
+    let ndc = vec2<f32>((f32(px.x) + 0.5) / dims.x * 2.0 - 1.0, 1.0 - (f32(px.y) + 0.5) / dims.y * 2.0);
+    return vec3<f32>(ndc.x * post.cam.w * post.cam.z * z, ndc.y * post.cam.z * z, z);
+}
+
+fn ssao(px: vec2<i32>, dims: vec2<f32>) -> f32 {
+    if (textureLoad(depth_tex, px, 0) >= 0.99999) {
+        return 1.0;
+    }
+    let p = view_pos(px, dims);
+    let dx = view_pos(px + vec2<i32>(1, 0), dims) - p;
+    let dy = view_pos(px + vec2<i32>(0, 1), dims) - p;
+    var n = normalize(cross(dy, dx));
+    if (dot(n, p) > 0.0) {
+        n = -n;
+    }
+    let radius = post.ao.x;
+    // Projected radius in pixels, capped so near surfaces stay cheap.
+    let rpx = clamp(radius / p.z * dims.y / (2.0 * post.cam.z), 2.0, 64.0);
+    var occ = 0.0;
+    for (var i = 0u; i < 12u; i = i + 1u) {
+        let t = (f32(i) + 0.5) / 12.0;
+        let a = f32(i) * 2.39996323;
+        let off = vec2<f32>(cos(a), sin(a)) * sqrt(t) * rpx;
+        let sp = clamp(px + vec2<i32>(off), vec2<i32>(0), vec2<i32>(dims) - vec2<i32>(1));
+        let v = view_pos(sp, dims) - p;
+        let l = length(v);
+        if (l > 0.001 && l < radius) {
+            occ += max(dot(v, n) / l - 0.15, 0.0) * (1.0 - l / radius);
+        }
+    }
+    return 1.0 - clamp(occ / 12.0 * 2.0 * post.ao.y, 0.0, 1.0);
+}
+
 // Circle of confusion in 0..1 for a depth buffer value.
 fn coc_of(d: f32) -> f32 {
     let dist = view_distance(d);
@@ -90,6 +127,9 @@ fn coc_of(d: f32) -> f32 {
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     var c = textureSampleLevel(hdr_tex, hdr_samp, in.uv, 0.0).rgb;
+    if (post.ao.x > 0.0) {
+        c = c * ssao(vec2<i32>(in.pos.xy), vec2<f32>(textureDimensions(hdr_tex)));
+    }
     if (post.dof.x > 0.0) {
         let dims = vec2<f32>(textureDimensions(hdr_tex));
         let px = vec2<i32>(in.pos.xy);
