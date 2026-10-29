@@ -76,9 +76,10 @@ impl Assets {
             roughness: if rma.is_some() { m.float("g_flRoughnessScaleFactor", 1.0) } else { 0.7 },
             metalness: m.float("g_flMetalness", 0.0),
             bump: m.float("g_flBumpStrength", 1.0),
-            unlit: false,
-            translucent: false,
+            unlit: m.flag("F_UNLIT"),
+            translucent: m.flag("F_TRANSLUCENT"),
             additive: false,
+            alpha_cutoff: if m.flag("F_ALPHA_TEST") { m.float("g_flAlphaTestReference", 0.5) } else { 0.0 },
         })
     }
 

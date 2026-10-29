@@ -14,12 +14,14 @@ fn walk(p: &Path, out: &mut Vec<std::path::PathBuf>) {
 fn main() {
     let mut files = vec![];
     walk(Path::new(&std::env::args().nth(1).unwrap()), &mut files);
+    let mut ints: BTreeMap<String, usize> = Default::default();
     let (mut tex, mut flt, mut shaders): (BTreeMap<String, usize>, BTreeMap<String, usize>, BTreeMap<String, usize>) = Default::default();
     let mut n = 0;
     for f in &files {
         if let Ok(m) = vmat::parse(&std::fs::read(f).unwrap()) {
             n += 1;
             for k in m.textures.keys() { *tex.entry(k.clone()).or_default() += 1 }
+            for (k, v) in &m.ints { *ints.entry(format!("{k}={v}")).or_default() += 1 }
             for k in m.floats.keys() { *flt.entry(k.clone()).or_default() += 1 }
             *shaders.entry(m.shader.clone()).or_default() += 1;
         }
@@ -29,9 +31,10 @@ fn main() {
         let mut v: Vec<_> = m.iter().collect();
         v.sort_by(|a, b| b.1.cmp(a.1));
         println!("-- {label}");
-        for (k, c) in v.iter().take(18) { println!("{c:6} {k}") }
+        for (k, c) in v.iter().take(40) { println!("{c:6} {k}") }
     };
     top(&tex, "textures");
     top(&flt, "floats");
+    top(&ints, "ints");
     top(&shaders, "shaders");
 }

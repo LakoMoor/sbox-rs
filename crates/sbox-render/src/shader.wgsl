@@ -183,6 +183,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         ao = rma.b;
     }
     let albedo4 = textureSample(color_tex, color_samp, uv);
+    if ((flags & 8u) != 0u && albedo4.a < mat.uv_scale.z) {
+        discard;
+    }
     let albedo = obj.tint.rgb * mat.tint.rgb * albedo4.rgb;
     let v = normalize(g.camera_pos.xyz - in.world_pos);
 
@@ -199,5 +202,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     if ((flags & 4u) != 0u) {
         return vec4<f32>(albedo, obj.tint.a * albedo4.a);
     }
-    return vec4<f32>(aces(color), obj.tint.a);
+    var alpha = obj.tint.a;
+    if ((flags & 16u) != 0u) {
+        alpha = alpha * mat.tint.a * albedo4.a;
+    }
+    return vec4<f32>(aces(color), alpha);
 }

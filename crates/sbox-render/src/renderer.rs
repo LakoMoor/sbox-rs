@@ -65,11 +65,13 @@ pub struct MaterialDesc {
     pub translucent: bool,
     /// With `translucent`: add the colour to the framebuffer instead of alpha blending.
     pub additive: bool,
+    /// Discard fragments whose albedo alpha is below this value (0 = alpha test off).
+    pub alpha_cutoff: f32,
 }
 
 impl Default for MaterialDesc {
     fn default() -> Self {
-        Self { color: None, normal: None, rma: None, tint: [1.0; 4], uv_scale: [1.0; 2], roughness: 0.7, metalness: 0.0, bump: 1.0, unlit: false, translucent: false, additive: false }
+        Self { color: None, normal: None, rma: None, tint: [1.0; 4], uv_scale: [1.0; 2], roughness: 0.7, metalness: 0.0, bump: 1.0, unlit: false, translucent: false, additive: false, alpha_cutoff: 0.0 }
     }
 }
 
@@ -656,12 +658,14 @@ impl Renderer {
         let color = &self.textures[d.color.map_or(0, |t| t.0 as usize)];
         let normal = &self.textures[d.normal.unwrap_or(self.flat_normal).0 as usize];
         let rma = &self.textures[d.rma.map_or(0, |t| t.0 as usize)];
-        let flags = d.normal.is_some() as u32 as f32 + 2.0 * d.rma.is_some() as u32 as f32 + 4.0 * d.unlit as u32 as f32;
+        let flags = d.normal.is_some() as u32 as f32 + 2.0 * d.rma.is_some() as u32 as f32 + 4.0 * d.unlit as u32 as f32
+            + 8.0 * (d.alpha_cutoff > 0.0) as u32 as f32
+            + 16.0 * d.translucent as u32 as f32;
         let ub = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("material"),
             contents: bytemuck::bytes_of(&MaterialUniform {
                 tint: d.tint,
-                uv_scale: [d.uv_scale[0], d.uv_scale[1], 0.0, 0.0],
+                uv_scale: [d.uv_scale[0], d.uv_scale[1], d.alpha_cutoff, 0.0],
                 pbr: [d.roughness, d.metalness, d.bump, flags],
             }),
             usage: wgpu::BufferUsages::UNIFORM,

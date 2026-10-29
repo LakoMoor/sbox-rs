@@ -10,6 +10,8 @@ pub struct Material {
     pub name: String,
     pub shader: String,
     pub floats: HashMap<String, f32>,
+    /// Integer parameters, including the `F_*` shader feature flags.
+    pub ints: HashMap<String, i64>,
     pub vectors: HashMap<String, [f32; 4]>,
     /// Parameter name (e.g. `g_tColor`) -> virtual path of the `.vtex`.
     pub textures: HashMap<String, String>,
@@ -37,6 +39,10 @@ impl Material {
     pub fn rma_texture(&self) -> Option<&str> {
         self.textures.get("g_tRma").map(String::as_str)
     }
+    /// Whether the shader feature flag `name` (e.g. `F_TRANSLUCENT`) is enabled.
+    pub fn flag(&self, name: &str) -> bool {
+        self.ints.get(name).is_some_and(|&v| v != 0)
+    }
     pub fn float(&self, name: &str, default: f32) -> f32 {
         self.floats.get(name).copied().unwrap_or(default)
     }
@@ -60,6 +66,11 @@ pub fn parse(file: &[u8]) -> Result<Material> {
         ..Default::default()
     };
     let list = |key: &str| kv.get(key).and_then(Value::as_array).map(<[Value]>::to_vec).unwrap_or_default();
+    for p in list("m_intParams") {
+        if let (Some(n), Some(v)) = (p.get("m_name").and_then(Value::as_str), p.get("m_nValue").and_then(Value::as_i64)) {
+            m.ints.insert(n.to_string(), v);
+        }
+    }
     for p in list("m_floatParams") {
         if let (Some(n), Some(v)) = (p.get("m_name").and_then(Value::as_str), p.get("m_flValue").and_then(Value::as_f64)) {
             m.floats.insert(n.to_string(), v as f32);
