@@ -86,6 +86,9 @@ pub struct GraphAnimator {
     clips: std::collections::HashMap<String, Option<sbox_resource::anim::Animation>>,
     weight_lists: std::collections::HashMap<String, sbox_resource::weightlist::WeightList>,
     clip_index: std::collections::HashMap<String, String>,
+    /// Skeletons of loaded clips by virtual path, and the path of the one all poses are expressed in.
+    skels: std::collections::HashMap<String, sbox_resource::model::AnimSkeleton>,
+    main_skel: Option<String>,
 }
 
 impl GraphAnimator {
@@ -103,7 +106,9 @@ impl GraphAnimator {
             .map(|t| sbox_resource::weightlist::parse(&t))
             .unwrap_or_default();
         let clip_index = fs.index("anim");
-        Self { graph, instance, fs, skeleton, anim_skel: None, parts, clips: Default::default(), weight_lists, clip_index }
+let mut me = Self { graph, instance, fs, skeleton, anim_skel: None, parts, clips: Default::default(), weight_lists, clip_index, skels: Default::default(), main_skel: None };
+        me.clip("WalkFast_N"); // fixes the main skeleton to the locomotion one
+        me
     }
 
     fn clip(&mut self, name: &str) -> Option<&sbox_resource::anim::Animation> {
@@ -117,14 +122,71 @@ impl GraphAnimator {
             if loaded.is_none() {
                 log::warn!("clip not found: {name}");
             }
-            if self.anim_skel.is_none() {
-                if let Some(a) = &loaded {
-                    self.anim_skel = self.fs.read(&a.skeleton).and_then(|d| sbox_resource::model::load_skel(&d).ok());
+            if let Some(a) = &loaded {
+                if !self.skels.contains_key(&a.skeleton) {
+                    if let Some(sk) = self.fs.read(&a.skeleton).and_then(|d| sbox_resource::model::load_skel(&d).ok()) {
+                        // The first skeleton seen becomes the main one (`new` preloads a locomotion clip so this is deterministic).
+                        if self.main_skel.is_none() {
+                            self.main_skel = Some(a.skeleton.clone());
+                            self.anim_skel = Some(sk.clone());
+                        }
+                        self.skels.insert(a.skeleton.clone(), sk);
+                    }
                 }
             }
             self.clips.insert(name.to_string(), loaded);
         }
         self.clips[name].as_ref()
+    }
+
+    /// Sample a clip and express the pose in the main skeleton's bone order.
+    fn sample_clip(&mut self, name: &str, t: f32) -> Option<(Vec<sbox_resource::anim::BonePose>, bool)> {
+        let (pose, additive, skel_path) = {
+            let a = self.clip(name)?;
+            (a.sample(t), a.additive, a.skeleton.clone())
+        };
+        if self.main_skel.as_deref() == Some(skel_path.as_str()) || self.main_skel.is_none() {
+            return Some((pose, additive));
+        }
+        // Sibling skeleton (`human.skel` vs `citizen_human.skel`): remap by bone name; bones the clip lacks keep the
+        // model bind pose. Facial clips are skipped: their bones are posed in another convention and displace the ears and eyes.
+        if name.starts_with("Expressions") || name.starts_with("Eyes_") {
+            return None;
+        }
+        let (main, own) = (self.anim_skel.as_ref()?, self.skels.get(&skel_path)?);
+        let own_idx: std::collections::HashMap<&str, usize> = own.names.iter().enumerate().map(|(i, n)| (n.as_str(), i)).collect();
+        let model_idx: std::collections::HashMap<&str, usize> = self.skeleton.names.iter().enumerate().map(|(i, n)| (n.as_str(), i)).collect();
+        // Bones below the head keep the bind pose (the face rig differs between the two skeletons).
+        let head = main.names.iter().position(|n| n == "head");
+        let under_head = |mut i: usize| {
+            while let Some(&p) = main.parents.get(i) {
+                if p < 0 {
+                    return false;
+                }
+                i = p as usize;
+                if Some(i) == head {
+                    return true;
+                }
+            }
+            false
+        };
+        let remapped = main
+            .names
+            .iter()
+            .enumerate()
+            .map(|(bi, n)| match own_idx.get(n.as_str()).and_then(|&i| pose.get(i)).filter(|_| !under_head(bi)) {
+                Some(p) => *p,
+                None => {
+                    let b = model_idx.get(n.as_str());
+                    sbox_resource::anim::BonePose {
+                        position: b.map_or([0.0; 3], |&i| self.skeleton.bind_pos[i]),
+                        rotation: b.map_or([0.0, 0.0, 0.0, 1.0], |&i| self.skeleton.bind_rot[i]),
+                        scale: 1.0,
+                    }
+                }
+            })
+            .collect();
+        Some((remapped, additive))
     }
 }
 
@@ -134,7 +196,7 @@ impl Component for GraphAnimator {
             let mut inst = std::mem::replace(&mut self.instance, sbox_resource::animgraph::Instance::new(&self.graph));
             let graph = std::mem::take(&mut self.graph);
             let this = std::cell::RefCell::new(&mut *self);
-            let mut sample = |n: &str, t: f32| this.borrow_mut().clip(n).map(|a| (a.sample(t), a.additive));
+            let mut sample = |n: &str, t: f32| this.borrow_mut().sample_clip(n, t);
             let mut len = |n: &str| this.borrow_mut().clip(n).map_or(1.0, |a| a.duration);
             let mut weights = |name: &str| {
                 let me = this.borrow();

@@ -5,7 +5,7 @@
 //! Not supported: collisions, followers, sprite sheet animation, trails/stretch, local space, force/orbital fields
 //! beyond a constant force direction, depth feathering.
 
-use sbox_math::{Angles, RotationExt, Transform, Vec3};
+use sbox_math::{Angles, Transform, Vec3};
 use sbox_render::{MaterialDesc, MeshData, Renderer, Vertex};
 use sbox_scene::{impl_component_any, parse_color, CameraComponent, Component, GoId, Handle, ModelRenderer, Scene};
 use serde_json::Value;
