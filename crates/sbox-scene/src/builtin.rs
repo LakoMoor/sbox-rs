@@ -183,3 +183,23 @@ impl Default for Sharpen {
 impl Component for Sharpen {
     impl_component_any!();
 }
+
+/// Depth of field: pixels farther than `focal_distance` (behind) or nearer (in front) are blurred.
+pub struct DepthOfField {
+    pub focal_distance: f32,
+    pub focus_range: f32,
+    /// Maximum blur radius in pixels at a 1280x720 reference size.
+    pub blur_size: f32,
+    pub front_blur: bool,
+    pub back_blur: bool,
+}
+
+impl Default for DepthOfField {
+    fn default() -> Self {
+        Self { focal_distance: 100.0, focus_range: 100.0, blur_size: 8.0, front_blur: false, back_blur: true }
+    }
+}
+
+impl Component for DepthOfField {
+    impl_component_any!();
+}

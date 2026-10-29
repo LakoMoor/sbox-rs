@@ -3,7 +3,7 @@ use anyhow::{anyhow, Result};
 use bytemuck::{Pod, Zeroable};
 use sbox_math::{sbox_to_view, Mat4, RotationExt, Transform, Vec3};
 use sbox_resource::vtex::{TexFormat, Texture};
-use sbox_scene::{Sharpen, TonemapMode, Tonemapping, Bloom, Vignette, CameraComponent, DirectionalLight, MaterialId, MeshId, ModelRenderer, PointLight, Scene, SpotLight};
+use sbox_scene::{DepthOfField, Sharpen, TonemapMode, Tonemapping, Bloom, Vignette, CameraComponent, DirectionalLight, MaterialId, MeshId, ModelRenderer, PointLight, Scene, SpotLight};
 use wgpu::util::DeviceExt;
 
 const MAX_POINT_LIGHTS: usize = 8;
@@ -86,6 +86,8 @@ struct PostUniform {
     bloom_tint: [f32; 4],
     extra: [f32; 4],
     fx: [f32; 4],
+    dof: [f32; 4],
+    cam: [f32; 4],
 }
 
 /// A textured screen-space rectangle drawn over the finished frame (`rect` = x, y, width, height in pixels, origin top-left).
@@ -99,7 +101,6 @@ pub struct UiRect {
 struct HdrTarget {
     size: (u32, u32),
     view: wgpu::TextureView,
-    bind_group: wgpu::BindGroup,
 }
 
 struct GpuMaterial {
@@ -765,7 +766,7 @@ impl Renderer {
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: DEPTH_FORMAT,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
                 view_formats: &[],
             })
             .create_view(&Default::default())
@@ -786,6 +787,12 @@ impl Renderer {
                     binding: 2,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Depth, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
                     count: None,
                 },
             ],
@@ -870,16 +877,7 @@ impl Renderer {
             view_formats: &[],
         });
         let view = tex.create_view(&Default::default());
-        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("post"),
-            layout: &self.post_layout,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
-                wgpu::BindGroupEntry { binding: 2, resource: self.post_buf.as_entire_binding() },
-            ],
-        });
-        self.hdr = Some(HdrTarget { size, view, bind_group });
+        self.hdr = Some(HdrTarget { size, view });
     }
 
     pub fn resize(&mut self, w: u32, h: u32) {
@@ -987,6 +985,7 @@ impl Renderer {
         let aspect = size.0 as f32 / size.1 as f32;
         self.ensure_hdr(size);
         let cam = scene.iter_components::<CameraComponent>().max_by_key(|(_, c)| c.priority);
+        let (z_near, z_far) = cam.map_or((1.0, 1000.0), |(_, c)| (c.z_near, c.z_far));
         let (cam_xf, clear, view_proj) = match cam {
             Some((go, c)) => {
                 let xf = scene.world_transform(go);
@@ -1182,6 +1181,7 @@ impl Renderer {
             let bloom = scene.iter_components::<Bloom>().next().map(|(_, b)| b);
             let vig = scene.iter_components::<Vignette>().next().map(|(_, v)| v);
             let tm = scene.iter_components::<Tonemapping>().next().map(|(_, t)| t);
+            let dof = scene.iter_components::<DepthOfField>().next().map(|(_, d)| d);
             let sharpen = scene.iter_components::<Sharpen>().next().map_or(0.0, |(_, s)| s.scale);
             let post = PostUniform {
                 params: [bloom.map_or(0.0, |b| b.strength), bloom.map_or(1.0, |b| b.threshold), vig.map_or(0.0, |v| v.intensity), vig.map_or(1.0, |v| v.smoothness)],
@@ -1191,6 +1191,8 @@ impl Renderer {
                 },
                 extra: [vig.map_or(0.0, |v| v.roundness), aspect, 0.03, tm.map_or(0.0, |t| match t.mode { TonemapMode::Aces => 0.0, TonemapMode::AgX => 1.0, TonemapMode::Reinhard => 2.0 })],
                 fx: [sharpen, 1.0 / size.0 as f32, 1.0 / size.1 as f32, 0.0],
+                dof: dof.map_or([0.0; 4], |d| [d.focal_distance.max(1.0), d.focus_range, d.blur_size, d.back_blur as u32 as f32 + 2.0 * d.front_blur as u32 as f32]),
+                cam: [z_near, z_far, 0.0, 0.0],
             };
             self.queue.write_buffer(&self.post_buf, 0, bytemuck::bytes_of(&post));
             let mut ui_groups = Vec::new();
@@ -1223,7 +1225,17 @@ impl Renderer {
                 occlusion_query_set: None,
             });
             pass.set_pipeline(&self.post_pipeline);
-            pass.set_bind_group(0, &self.hdr.as_ref().unwrap().bind_group, &[]);
+            let post_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("post"),
+                layout: &self.post_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&self.hdr.as_ref().unwrap().view) },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                    wgpu::BindGroupEntry { binding: 2, resource: self.post_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(depth) },
+                ],
+            });
+            pass.set_bind_group(0, &post_bg, &[]);
             pass.draw(0..3, 0..1);
             if let Some(buf) = &ui_buf {
                 pass.set_pipeline(&self.ui_pipeline);

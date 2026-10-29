@@ -6,11 +6,16 @@ struct Post {
     extra: vec4<f32>,
     // x = sharpen scale (0 = off), yz = texel size in uv units
     fx: vec4<f32>,
+    // x = focal distance (0 = depth of field off), y = focus range, z = max blur radius in pixels, w = blur flags (1 back, 2 front)
+    dof: vec4<f32>,
+    // x = z near, y = z far
+    cam: vec4<f32>,
 };
 
 @group(0) @binding(0) var hdr_tex: texture_2d<f32>;
 @group(0) @binding(1) var hdr_samp: sampler;
 @group(0) @binding(2) var<uniform> post: Post;
+@group(0) @binding(3) var depth_tex: texture_depth_2d;
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
@@ -64,9 +69,48 @@ fn tonemap(c: vec3<f32>, mode: f32) -> vec3<f32> {
     return aces(c);
 }
 
+fn view_distance(d: f32) -> f32 {
+    return post.cam.x * post.cam.y / (post.cam.y - d * (post.cam.y - post.cam.x));
+}
+
+// Circle of confusion in 0..1 for a depth buffer value.
+fn coc_of(d: f32) -> f32 {
+    let dist = view_distance(d);
+    let flags = u32(post.dof.w + 0.5);
+    let range = max(post.dof.y, 1.0);
+    var k = 0.0;
+    if (dist > post.dof.x && (flags & 1u) != 0u) {
+        k = (dist - post.dof.x) / range;
+    } else if (dist < post.dof.x && (flags & 2u) != 0u) {
+        k = (post.dof.x - dist) / range;
+    }
+    return clamp(k, 0.0, 1.0);
+}
+
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     var c = textureSampleLevel(hdr_tex, hdr_samp, in.uv, 0.0).rgb;
+    if (post.dof.x > 0.0) {
+        let dims = vec2<f32>(textureDimensions(hdr_tex));
+        let px = vec2<i32>(in.pos.xy);
+        let coc = coc_of(textureLoad(depth_tex, px, 0));
+        if (coc > 0.01) {
+            let radius = coc * post.dof.z * dims.y / 720.0;
+            var acc = c;
+            var wsum = 1.0;
+            for (var i = 0u; i < 24u; i = i + 1u) {
+                let t = (f32(i) + 0.5) / 24.0;
+                let a = f32(i) * 2.39996323;
+                let off = vec2<f32>(cos(a), sin(a)) * sqrt(t) * radius;
+                let sp = clamp(px + vec2<i32>(off), vec2<i32>(0), vec2<i32>(dims) - vec2<i32>(1));
+                // Weight by the sample's own blur so sharp foreground does not bleed onto the background.
+                let w = max(coc_of(textureLoad(depth_tex, sp, 0)), 0.05);
+                acc += textureLoad(hdr_tex, sp, 0).rgb * w;
+                wsum += w;
+            }
+            c = acc / wsum;
+        }
+    }
     if (post.fx.x > 0.0) {
         let t = post.fx.yz;
         let n = textureSampleLevel(hdr_tex, hdr_samp, in.uv + vec2<f32>(0.0, -t.y), 0.0).rgb

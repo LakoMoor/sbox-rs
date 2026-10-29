@@ -301,6 +301,15 @@ impl ComponentLoader for SceneLoader<'_> {
                 scene.add_component(go, sbox_scene::Sharpen { scale: p.get("Scale").and_then(Value::as_f64).unwrap_or(0.25) as f32 });
                 true
             }
+            "DepthOfField" => {
+                let f = |k: &str, d: f64| p.get(k).and_then(Value::as_f64).unwrap_or(d) as f32;
+                let b = |k: &str, d: bool| p.get(k).and_then(Value::as_bool).unwrap_or(d);
+                scene.add_component(
+                    go,
+                    sbox_scene::DepthOfField { focal_distance: f("FocalDistance", 100.0), focus_range: f("FocusRange", 100.0), blur_size: f("BlurSize", 8.0), front_blur: b("FrontBlur", false), back_blur: b("BackBlur", true) },
+                );
+                true
+            }
             "Vignette" => {
                 let f = |k: &str, d: f64| p.get(k).and_then(Value::as_f64).unwrap_or(d) as f32;
                 scene.add_component(go, sbox_scene::Vignette { intensity: f("Intensity", 1.0), smoothness: f("Smoothness", 1.0), roundness: f("Roundness", 1.0) });
