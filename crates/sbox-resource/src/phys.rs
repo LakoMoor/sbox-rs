@@ -16,30 +16,49 @@ fn vec3(v: &Value) -> Option<[f32; 3]> {
     Some([a.first()?.as_f64()? as f32, a.get(1)?.as_f64()? as f32, a.get(2)?.as_f64()? as f32])
 }
 
-/// Shapes of a physics KV3 tree (`m_parts[].m_rnShape`). Returns `None` for skeletal physics (several parts or joints),
-/// whose shapes live in bone space and need the pose to be placed.
-pub fn shapes(kv: &Value) -> Option<Vec<PhysShape>> {
-    let parts = kv.get("m_parts").and_then(Value::as_array)?;
-    if parts.len() != 1 || !kv.get("m_joints").and_then(Value::as_array).unwrap_or(&[]).is_empty() {
+/// Bone transform of a part: `m_bindPose[i]` is a row-major 3x4 matrix (rotation rows with the translation in the last column).
+fn bind(kv: &Value, part: usize) -> Option<[f32; 12]> {
+    let m = kv.get("m_bindPose")?.as_array()?.get(part)?.as_array()?;
+    let mut out = [0.0; 12];
+    if m.len() != 12 {
         return None;
     }
-    let sh = parts[0].get("m_rnShape")?;
-    let list = |k: &str| sh.get(k).and_then(Value::as_array).unwrap_or(&[]);
+    for (o, v) in out.iter_mut().zip(m) {
+        *o = v.as_f64()? as f32;
+    }
+    Some(out)
+}
+
+fn place(m: &Option<[f32; 12]>, p: [f32; 3]) -> [f32; 3] {
+    let Some(m) = m else { return p };
+    let row = |r: usize| m[r * 4] * p[0] + m[r * 4 + 1] * p[1] + m[r * 4 + 2] * p[2] + m[r * 4 + 3];
+    [row(0), row(1), row(2)]
+}
+
+/// Shapes of a physics KV3 tree (`m_parts[].m_rnShape`) in the model's rest pose: every part's shapes are moved from
+/// its bone space with `m_bindPose[part]`. Joints (`m_joints`) are not read, so the parts stay rigidly together.
+pub fn shapes(kv: &Value) -> Option<Vec<PhysShape>> {
+    let parts = kv.get("m_parts").and_then(Value::as_array)?;
     let mut out = Vec::new();
-    for h in list("m_hulls") {
-        let verts: Vec<[f32; 3]> = h.get("m_Hull")?.get("m_Vertices").and_then(Value::as_array).unwrap_or(&[]).iter().filter_map(vec3).collect();
-        if verts.len() >= 4 {
-            out.push(PhysShape::Hull(verts));
+    for (i, part) in parts.iter().enumerate() {
+        let m = bind(kv, i);
+        let sh = part.get("m_rnShape")?;
+        let list = |k: &str| sh.get(k).and_then(Value::as_array).unwrap_or(&[]);
+        for h in list("m_hulls") {
+            let verts: Vec<[f32; 3]> = h.get("m_Hull")?.get("m_Vertices").and_then(Value::as_array).unwrap_or(&[]).iter().filter_map(vec3).map(|v| place(&m, v)).collect();
+            if verts.len() >= 4 {
+                out.push(PhysShape::Hull(verts));
+            }
         }
-    }
-    for s in list("m_spheres") {
-        let s = s.get("m_Sphere")?;
-        out.push(PhysShape::Sphere { center: vec3(s.get("m_vCenter")?)?, radius: s.get("m_flRadius")?.as_f64()? as f32 });
-    }
-    for c in list("m_capsules") {
-        let c = c.get("m_Capsule")?;
-        let ends = c.get("m_vCenter")?.as_array()?;
-        out.push(PhysShape::Capsule { a: vec3(ends.first()?)?, b: vec3(ends.get(1)?)?, radius: c.get("m_flRadius")?.as_f64()? as f32 });
+        for s in list("m_spheres") {
+            let s = s.get("m_Sphere")?;
+            out.push(PhysShape::Sphere { center: place(&m, vec3(s.get("m_vCenter")?)?), radius: s.get("m_flRadius")?.as_f64()? as f32 });
+        }
+        for c in list("m_capsules") {
+            let c = c.get("m_Capsule")?;
+            let ends = c.get("m_vCenter")?.as_array()?;
+            out.push(PhysShape::Capsule { a: place(&m, vec3(ends.first()?)?), b: place(&m, vec3(ends.get(1)?)?), radius: c.get("m_flRadius")?.as_f64()? as f32 });
+        }
     }
     (!out.is_empty()).then_some(out)
 }
@@ -86,8 +105,14 @@ mod tests {
     }
 
     #[test]
-    fn skeletal_physics_is_not_placed() {
-        let parts = Value::Array(vec![obj(vec![]), obj(vec![])]);
-        assert!(shapes(&obj(vec![("m_parts", parts)])).is_none());
+    fn parts_are_placed_with_their_bind_pose() {
+        let sphere = |x: f64| obj(vec![("m_rnShape", obj(vec![("m_spheres", Value::Array(vec![obj(vec![("m_Sphere", obj(vec![("m_vCenter", v3(x, 0., 0.)), ("m_flRadius", d(1.))]))])]))]))]);
+        // Part 1 is rotated 90 degrees about Z (x -> y) and moved up by 10.
+        let rot = Value::Array([0.0, -1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 10.0].iter().map(|&x| d(x)).collect());
+        let ident = Value::Array([1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0].iter().map(|&x| d(x)).collect());
+        let kv = obj(vec![("m_parts", Value::Array(vec![sphere(5.), sphere(5.)])), ("m_bindPose", Value::Array(vec![ident, rot]))]);
+        let s = shapes(&kv).unwrap();
+        assert_eq!(s[0], PhysShape::Sphere { center: [5.0, 0.0, 0.0], radius: 1.0 });
+        assert_eq!(s[1], PhysShape::Sphere { center: [0.0, 5.0, 10.0], radius: 1.0 });
     }
 }
