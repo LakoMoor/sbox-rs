@@ -104,13 +104,17 @@ cargo run --release -p sbox-resource --example survey -- path/to/game
 
 ## Roadmap
 
-1. Animation graphs, additive clips, root motion; clothing (`clothing_c`) and mesh groups
-2. Real shader translation (`vmesh_c` references done)
-3. ~~VPK~~ (v2 reader; `GameFs::from_game_dir` mounts the map packages under `core/maps`)
-4. Scene / prefab loading (`*.scene`, `*.prefab`)
-5. Input + character controller, audio, networking, UI
-6. Scripting story for game code
+Done (see "Not done yet" for the approximations): scene / prefab loading, maps from VPK (world nodes), models with external meshes, materials with the common `F_*` flags, animation graphs (reduced), particles, sounds, input + a basic character controller, a post-processing chain (tone mapping, bloom, vignette, sharpen, depth of field, SSAO, chromatic aberration, gradient fog), a screen-space UI overlay, `MeshComponent` / `Decal` / `SpotLight` / `ModelCollider`.
 
-## License
+Open, in rough order of value:
+
+1. Map entities (`vents_c`: binary key-values with hashed key names, type codes not yet decoded)
+2. `ScreenSpaceReflections`, `CubemapFog`, `VolumetricFogVolume`
+3. A real UI layer (panels, layout, input routing) behind `ScreenPanel` / `WorldPanel`
+4. Real shader translation: `.shader_c` is compiled GPU bytecode, so this means re-implementing the shaders by hand per material family
+5. Networking (needs a design decision)
+6. Scripting story for game code: a Rust API or an embedded .NET runtime (needs a design decision)
+
+## ## License
 
 MIT. s&box and Source 2 belong to their respective owners.
