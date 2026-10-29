@@ -175,7 +175,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
                 optical += max(tmax - tmin, 0.0) * post.vol_max[i].w;
             }
             // Density per world unit is a guess (no reference render to calibrate against).
-            c = mix(c, vec3<f32>(0.6, 0.65, 0.7), 1.0 - exp(-optical / 512.0));
+            c = mix(c, vec3<f32>(0.2, 0.22, 0.25), 1.0 - exp(-optical / 4096.0));
         }
     }
     if (post.dof.x > 0.0) {

@@ -639,6 +639,12 @@ impl Assets {
                 let go = scene.create_object("prop");
                 scene.set_local_transform(go, transform);
                 self.spawn(scene, go, &m, [1.0; 4], None);
+                // Collision is the model's bounding box (see `ModelCollider`); only `prop_physics` moves.
+                let shape = Shape::Box { center: (m.mins + m.maxs) * 0.5, size: m.maxs - m.mins };
+                scene.add_component(go, Collider { shape, is_trigger: false });
+                if e.classname() == "prop_physics" && e.bool("motiondisabled") != Some(true) {
+                    scene.add_component(go, Rigidbody::default());
+                }
                 info.props += 1;
             }
             _ => {}
