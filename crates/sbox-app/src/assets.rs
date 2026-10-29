@@ -148,6 +148,11 @@ impl ComponentLoader for SceneLoader<'_> {
                 self.assets.spawn(scene, go, &m, tint, ov);
                 true
             }
+            "CubeController" => {
+                let speed = p.get("MoveSpeed").and_then(Value::as_f64).unwrap_or(100.0) as f32;
+                scene.add_component(go, crate::game::CubeController { move_speed: speed });
+                true
+            }
             // Post-processing / environment components with no renderer support yet; accepted so they are not reported as unknown.
             "Bloom" | "EnvmapProbe" | "SkyBox2D" => true,
             "DirectionalLight" => {

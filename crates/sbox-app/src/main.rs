@@ -1,4 +1,5 @@
 mod assets;
+mod game;
 
 use std::sync::Arc;
 use std::time::Instant;
