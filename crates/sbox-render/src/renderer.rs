@@ -598,7 +598,12 @@ impl Renderer {
 
     /// Install a HDR (BC6H) cubemap as the sky, drawn behind everything. Returns false if unsupported.
     pub fn set_skybox(&mut self, t: &Texture, exposure: f32, tint: [f32; 4]) -> bool {
-        if !t.is_cube() || t.format != TexFormat::Bc6h || !self.bc_supported || t.width % 4 != 0 {
+        let format = match t.format {
+            TexFormat::Bc6h if self.bc_supported && t.width % 4 == 0 => wgpu::TextureFormat::Bc6hRgbUfloat,
+            TexFormat::Rgba16161616F => wgpu::TextureFormat::Rgba16Float,
+            _ => return false,
+        };
+        if !t.is_cube() {
             return false;
         }
         // wgpu wants layer-major order: for each face, all mips.
@@ -607,7 +612,7 @@ impl Renderer {
         for f in 0..faces {
             for (level, m) in t.mips.iter().enumerate() {
                 let (w, h) = t.mip_size(level);
-                let one = TexFormat::Bc6h.image_size(w, h).unwrap();
+                let one = t.format.image_size(w, h).unwrap();
                 data.extend_from_slice(&m[f * one..(f + 1) * one]);
             }
         }
@@ -619,7 +624,7 @@ impl Renderer {
                 mip_level_count: t.mips.len() as u32,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Bc6hRgbUfloat,
+                format,
                 usage: wgpu::TextureUsages::TEXTURE_BINDING,
                 view_formats: &[],
             },
