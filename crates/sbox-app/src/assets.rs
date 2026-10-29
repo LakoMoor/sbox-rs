@@ -358,6 +358,33 @@ impl ComponentLoader for SceneLoader<'_> {
                 scene.add_component(go, Collider { shape: Shape::Sphere { center, radius }, is_trigger: trig });
                 true
             }
+            "Decal" => {
+                // Approximation: a camera-independent alpha-blended quad facing +X, without projection onto surfaces.
+                let Some(name) = p.get("Decals").and_then(Value::as_array).and_then(|a| a.first()).and_then(Value::as_str) else { return true };
+                let Some(fs) = &self.assets.fs else { return true };
+                let Some(data) = fs.read(name) else { return true };
+                // The compiled decal references its colour texture in the resource reference list.
+                let Some(tex_path) = find_vtex_path(&data) else { return true };
+                let Some(tex) = fs.read(&tex_path).and_then(|d| vtex::parse(&d).ok()) else { return true };
+                let Some(id) = self.r.upload_texture(&tex) else { return true };
+                let tint = match p.get("ColorTint") {
+                    Some(Value::Object(o)) => parse_color(o.get("ConstantA"), [1.0; 4]),
+                    other => parse_color(other, [1.0; 4]),
+                };
+                let mat = self.r.create_material_ex(&MaterialDesc { color: Some(id), tint, unlit: true, translucent: true, ..Default::default() });
+                let scale = p.get("Scale").and_then(Value::as_f64).unwrap_or(1.0) as f32;
+                let (hw, hh) = (tex.width as f32 * scale * 0.5, tex.height as f32 * scale * 0.5);
+                let v = |y: f32, z: f32, u: f32, vv: f32| sbox_render::Vertex { position: [0.0, y, z], normal: [1.0, 0.0, 0.0], uv: [u, vv], joints: [0; 4], weights: [0.0; 4] };
+                let mesh = self.r.upload_mesh(&MeshData {
+                    vertices: vec![v(hw, hh, 0.0, 0.0), v(-hw, hh, 1.0, 0.0), v(-hw, -hh, 1.0, 1.0), v(hw, -hh, 0.0, 1.0)],
+                    indices: vec![0, 1, 2, 0, 2, 3],
+                });
+                let mut m = ModelRenderer::new(mesh);
+                m.material = mat;
+                m.cast_shadows = false;
+                scene.add_component(go, m);
+                true
+            }
             "ModelCollider" => {
                 // Approximation: the collision shape is the model's bounding box (the real one is a `vphys_c` hull set).
                 let Some(path) = p.get("Model").and_then(Value::as_str) else { return true };
@@ -441,4 +468,11 @@ impl Assets {
         }
         (count, mins, maxs)
     }
+}
+
+/// First `*.vtex` path mentioned in a compiled resource's reference list.
+fn find_vtex_path(data: &[u8]) -> Option<String> {
+    let end = data.windows(5).position(|w| w == b".vtex")? + 5;
+    let start = data[..end].iter().rposition(|&b| b == 0 || b < 32).map_or(0, |i| i + 1);
+    std::str::from_utf8(&data[start..end]).ok().map(|p| p.replace('\\', "/"))
 }
