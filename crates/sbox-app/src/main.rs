@@ -3,6 +3,8 @@ mod audio;
 mod game;
 mod layout;
 mod meshcomp;
+#[allow(dead_code)]
+mod razor;
 mod particles;
 mod text;
 mod ui;
