@@ -45,7 +45,7 @@ fn main() {
             match kv3::parse(d) {
                 Ok(_) => ok += 1,
                 Err(e) => {
-                    let msg = e.to_string();
+                    let msg = format!("{} [{}]", e, b.name());
                     let ent = errs.entry(msg).or_insert((0, f.display().to_string()));
                     ent.0 += 1;
                 }
