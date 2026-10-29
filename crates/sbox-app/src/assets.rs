@@ -140,7 +140,7 @@ fn strip_ns(t: &str) -> &str {
 impl ComponentLoader for SceneLoader<'_> {
     fn create(&mut self, scene: &mut Scene, go: GoId, type_name: &str, p: &Value) -> bool {
         match strip_ns(type_name) {
-            "ModelRenderer" => {
+            "ModelRenderer" | "SkinnedModelRenderer" | "Prop" => {
                 let Some(path) = p.get("Model").and_then(Value::as_str) else { return true };
                 let Some(m) = self.assets.load_model(self.r, path) else { return true };
                 let tint = parse_color(p.get("Tint"), [1.0; 4]);
@@ -148,6 +148,8 @@ impl ComponentLoader for SceneLoader<'_> {
                 self.assets.spawn(scene, go, &m, tint, ov);
                 true
             }
+            // Post-processing / environment components with no renderer support yet; accepted so they are not reported as unknown.
+            "Bloom" | "EnvmapProbe" | "SkyBox2D" => true,
             "DirectionalLight" => {
                 let c = parse_color(p.get("LightColor"), [1.0; 4]);
                 let a = parse_color(p.get("SkyColor"), [0.15, 0.17, 0.2, 1.0]);
