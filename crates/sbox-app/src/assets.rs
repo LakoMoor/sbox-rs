@@ -347,6 +347,21 @@ impl ComponentLoader for SceneLoader<'_> {
                 );
                 true
             }
+            "CubemapFog" => {
+                let t = parse_color(p.get("Tint"), [1.0; 4]);
+                let f = |k: &str, d: f64| p.get(k).and_then(Value::as_f64).unwrap_or(d) as f32;
+                scene.add_component(
+                    go,
+                    sbox_scene::CubemapFog {
+                        tint: [t[0], t[1], t[2]],
+                        blur: f("Blur", 0.5),
+                        start_distance: f("StartDistance", 0.0),
+                        end_distance: f("EndDistance", 4096.0),
+                        falloff_exponent: f("FalloffExponent", 1.0),
+                    },
+                );
+                true
+            }
             "Vignette" => {
                 let f = |k: &str, d: f64| p.get(k).and_then(Value::as_f64).unwrap_or(d) as f32;
                 scene.add_component(go, sbox_scene::Vignette { intensity: f("Intensity", 1.0), smoothness: f("Smoothness", 1.0), roundness: f("Roundness", 1.0) });

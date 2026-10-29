@@ -3,7 +3,7 @@ use anyhow::{anyhow, Result};
 use bytemuck::{Pod, Zeroable};
 use sbox_math::{sbox_to_view, Mat4, RotationExt, Transform, Vec3};
 use sbox_resource::vtex::{TexFormat, Texture};
-use sbox_scene::{FogVolume, GradientFog, AmbientOcclusion, ChromaticAberration, DepthOfField, Sharpen, TonemapMode, Tonemapping, Bloom, Vignette, CameraComponent, DirectionalLight, MaterialId, MeshId, ModelRenderer, PointLight, Scene, SpotLight};
+use sbox_scene::{CubemapFog, FogVolume, GradientFog, AmbientOcclusion, ChromaticAberration, DepthOfField, Sharpen, TonemapMode, Tonemapping, Bloom, Vignette, CameraComponent, DirectionalLight, MaterialId, MeshId, ModelRenderer, PointLight, Scene, SpotLight};
 use wgpu::util::DeviceExt;
 
 const MAX_POINT_LIGHTS: usize = 8;
@@ -99,6 +99,8 @@ struct PostUniform {
     cam_fwd: [f32; 4],
     vol_min: [[f32; 4]; 4],
     vol_max: [[f32; 4]; 4],
+    cube_fog: [f32; 4],  // start, end (0 = off), falloff exponent, blur
+    cube_tint: [f32; 4], // rgb tint, sky exposure
 }
 
 /// A textured screen-space rectangle drawn over the finished frame (`rect` = x, y, width, height in pixels, origin top-left).
@@ -180,6 +182,9 @@ pub struct Renderer {
     materials: Vec<GpuMaterial>,
     bc_supported: bool,
     sky: Option<Sky>,
+    sky_view: Option<wgpu::TextureView>,
+    /// 1x1 black cube bound to the post pass while there is no sky.
+    dummy_cube: wgpu::TextureView,
     flat_normal: TextureId,
     shadow_view: wgpu::TextureView,
     shadow_pipeline: wgpu::RenderPipeline,
@@ -480,6 +485,23 @@ impl Renderer {
         });
 
         let depth_view = Self::make_depth(&device, w, h);
+        let dummy_cube = device
+            .create_texture_with_data(
+                &queue,
+                &wgpu::TextureDescriptor {
+                    label: Some("dummy cube"),
+                    size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 6 },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba16Float,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                },
+                wgpu::util::TextureDataOrder::LayerMajor,
+                &[0u8; 8 * 6],
+            )
+            .create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::Cube), ..Default::default() });
         let (post_pipeline, post_layout, post_buf) = Self::make_post(&device, config.format);
         let (ui_pipeline, ui_layout) = Self::make_ui(&device, config.format);
         let mut this = Self {
@@ -513,6 +535,8 @@ impl Renderer {
             materials: vec![],
             bc_supported,
             sky: None,
+            sky_view: None,
+            dummy_cube,
             flat_normal: TextureId(0),
             shadow_view,
             shadow_pipeline,
@@ -709,6 +733,7 @@ impl Renderer {
             cache: None,
         });
         self.sky = Some(Sky { pipeline, bind_group, ub, exposure, tint });
+        self.sky_view = Some(view);
         true
     }
 
@@ -810,6 +835,12 @@ impl Renderer {
                     binding: 3,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Depth, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::Cube, multisampled: false },
                     count: None,
                 },
             ],
@@ -1211,6 +1242,7 @@ impl Renderer {
                 vol_max[vol_count] = [p.x + v.maxs[0], p.y + v.maxs[1], p.z + v.maxs[2], v.strength];
                 vol_count += 1;
             }
+            let cfog = self.sky.as_ref().and_then(|sky| scene.iter_components::<CubemapFog>().next().map(|(_, f)| (sky.exposure, sky.tint, f)));
             let ao = scene.iter_components::<AmbientOcclusion>().next().map(|(_, a)| a);
             let dof = scene.iter_components::<DepthOfField>().next().map(|(_, d)| d);
             let sharpen = scene.iter_components::<Sharpen>().next().map_or(0.0, |(_, s)| s.scale);
@@ -1230,6 +1262,8 @@ impl Renderer {
                 cam_pos: [cam_xf.position.x, cam_xf.position.y, cam_xf.position.z, vol_count as f32],
                 vol_min,
                 vol_max,
+                cube_fog: cfog.map_or([0.0; 4], |(_, _, f)| [f.start_distance, f.end_distance, f.falloff_exponent, f.blur]),
+                cube_tint: cfog.map_or([0.0; 4], |(e, t, f)| [f.tint[0] * t[0], f.tint[1] * t[1], f.tint[2] * t[2], e]),
                 cam_right: (cam_rot * -Vec3::Y).extend(0.0).to_array(),
                 cam_up: (cam_rot * Vec3::Z).extend(0.0).to_array(),
                 cam_fwd: (cam_rot * Vec3::X).extend(0.0).to_array(),
@@ -1276,6 +1310,7 @@ impl Renderer {
                     wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
                     wgpu::BindGroupEntry { binding: 2, resource: self.post_buf.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(depth) },
+                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(self.sky_view.as_ref().unwrap_or(&self.dummy_cube)) },
                 ],
             });
             pass.set_bind_group(0, &post_bg, &[]);

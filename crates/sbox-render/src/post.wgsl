@@ -24,12 +24,15 @@ struct Post {
     // fog volumes (world AABBs); cam_pos.w = count; vol_max.w = strength
     vol_min: array<vec4<f32>, 4>,
     vol_max: array<vec4<f32>, 4>,
+    cube_fog: vec4<f32>,  // start, end (0 = off), falloff exponent, blur
+    cube_tint: vec4<f32>, // rgb tint, sky exposure
 };
 
 @group(0) @binding(0) var hdr_tex: texture_2d<f32>;
 @group(0) @binding(1) var hdr_samp: sampler;
 @group(0) @binding(2) var<uniform> post: Post;
 @group(0) @binding(3) var depth_tex: texture_depth_2d;
+@group(0) @binding(4) var sky_cube: texture_cube<f32>;
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
@@ -153,6 +156,17 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
             let along = pow(clamp((dist - post.fog.x) / max(post.fog.y - post.fog.x, 1.0), 0.0, 1.0), post.fog.z);
             let below = pow(clamp(1.0 - (world.z - post.fog_base.x) / max(post.fog.w, 1.0), 0.0, 1.0), post.fog_color.a);
             c = mix(c, post.fog_color.rgb, along * below);
+        }
+    }
+    if (post.cube_fog.y > 0.0) {
+        let dims = vec2<f32>(textureDimensions(hdr_tex));
+        let px = vec2<i32>(in.pos.xy);
+        if (textureLoad(depth_tex, px, 0) < 0.99999) {
+            let v = view_pos(px, dims);
+            let ray = post.cam_right.xyz * v.x + post.cam_up.xyz * v.y + post.cam_fwd.xyz * v.z;
+            let along = pow(clamp((length(v) - post.cube_fog.x) / max(post.cube_fog.y - post.cube_fog.x, 1.0), 0.0, 1.0), post.cube_fog.z);
+            let sky = textureSampleLevel(sky_cube, hdr_samp, normalize(ray), post.cube_fog.w * 6.0).rgb * post.cube_tint.rgb * post.cube_tint.w;
+            c = mix(c, sky, along);
         }
     }
     if (post.cam_pos.w > 0.5) {

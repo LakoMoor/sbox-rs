@@ -271,3 +271,23 @@ pub struct FogVolume {
 impl Component for FogVolume {
     impl_component_any!();
 }
+
+/// Distance fog coloured by the scene's sky cubemap (`CubemapFog`): the fog colour is the cube sampled along the view
+/// ray, `blur` (0..1) picks a lower mip. Needs a sky set with `Renderer::set_skybox`.
+pub struct CubemapFog {
+    pub tint: [f32; 3],
+    pub blur: f32,
+    pub start_distance: f32,
+    pub end_distance: f32,
+    pub falloff_exponent: f32,
+}
+
+impl Default for CubemapFog {
+    fn default() -> Self {
+        Self { tint: [1.0; 3], blur: 0.5, start_distance: 0.0, end_distance: 4096.0, falloff_exponent: 1.0 }
+    }
+}
+
+impl Component for CubemapFog {
+    impl_component_any!();
+}
