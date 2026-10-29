@@ -3,7 +3,7 @@ use anyhow::{anyhow, Result};
 use bytemuck::{Pod, Zeroable};
 use sbox_math::{sbox_to_view, Mat4, RotationExt, Transform, Vec3};
 use sbox_resource::vtex::{TexFormat, Texture};
-use sbox_scene::{AmbientOcclusion, ChromaticAberration, DepthOfField, Sharpen, TonemapMode, Tonemapping, Bloom, Vignette, CameraComponent, DirectionalLight, MaterialId, MeshId, ModelRenderer, PointLight, Scene, SpotLight};
+use sbox_scene::{GradientFog, AmbientOcclusion, ChromaticAberration, DepthOfField, Sharpen, TonemapMode, Tonemapping, Bloom, Vignette, CameraComponent, DirectionalLight, MaterialId, MeshId, ModelRenderer, PointLight, Scene, SpotLight};
 use wgpu::util::DeviceExt;
 
 const MAX_POINT_LIGHTS: usize = 8;
@@ -90,6 +90,13 @@ struct PostUniform {
     cam: [f32; 4],
     ao: [f32; 4],
     tm: [f32; 4],
+    fog: [f32; 4],
+    fog_color: [f32; 4],
+    fog_base: [f32; 4],
+    cam_pos: [f32; 4],
+    cam_right: [f32; 4],
+    cam_up: [f32; 4],
+    cam_fwd: [f32; 4],
 }
 
 /// A textured screen-space rectangle drawn over the finished frame (`rect` = x, y, width, height in pixels, origin top-left).
@@ -1185,6 +1192,8 @@ impl Renderer {
             let vig = scene.iter_components::<Vignette>().next().map(|(_, v)| v);
             let tm = scene.iter_components::<Tonemapping>().next().map(|(_, t)| t);
             let ca = scene.iter_components::<ChromaticAberration>().next().map_or([0.0; 2], |(_, c)| c.offset);
+            let fog = scene.iter_components::<GradientFog>().next().map(|(go, f)| (scene.world_transform(go).position.z, f));
+            let cam_rot = cam_xf.rotation;
             let ao = scene.iter_components::<AmbientOcclusion>().next().map(|(_, a)| a);
             let dof = scene.iter_components::<DepthOfField>().next().map(|(_, d)| d);
             let sharpen = scene.iter_components::<Sharpen>().next().map_or(0.0, |(_, s)| s.scale);
@@ -1198,6 +1207,13 @@ impl Renderer {
                 fx: [sharpen, 1.0 / size.0 as f32, 1.0 / size.1 as f32, 0.0],
                 dof: dof.map_or([0.0; 4], |d| [d.focal_distance.max(1.0), d.focus_range, d.blur_size, d.back_blur as u32 as f32 + 2.0 * d.front_blur as u32 as f32]),
                 cam: [z_near, z_far, (fov_y * 0.5).tan(), aspect],
+                fog: fog.map_or([0.0; 4], |(_, f)| [f.start_distance, f.end_distance, f.falloff_exponent, f.height]),
+                fog_color: fog.map_or([0.0; 4], |(_, f)| [f.color[0], f.color[1], f.color[2], f.vertical_falloff_exponent]),
+                fog_base: [fog.map_or(0.0, |(z, _)| z), 0.0, 0.0, 0.0],
+                cam_pos: [cam_xf.position.x, cam_xf.position.y, cam_xf.position.z, 0.0],
+                cam_right: (cam_rot * -Vec3::Y).extend(0.0).to_array(),
+                cam_up: (cam_rot * Vec3::Z).extend(0.0).to_array(),
+                cam_fwd: (cam_rot * Vec3::X).extend(0.0).to_array(),
                 tm: tm.map_or([0.0; 4], |t| [t.auto_exposure as u32 as f32, t.min_exposure, t.max_exposure, 0.0]),
                 ao: ao.map_or([0.0, 0.0, ca[0], ca[1]], |a| [a.radius, a.intensity, ca[0], ca[1]]),
             };

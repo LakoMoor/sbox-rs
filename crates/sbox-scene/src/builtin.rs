@@ -239,3 +239,23 @@ impl Default for ChromaticAberration {
 impl Component for ChromaticAberration {
     impl_component_any!();
 }
+
+/// Distance fog towards `color` between `start_distance` and `end_distance`, fading out above `height` over the object's Z.
+pub struct GradientFog {
+    pub color: [f32; 3],
+    pub start_distance: f32,
+    pub end_distance: f32,
+    pub falloff_exponent: f32,
+    pub height: f32,
+    pub vertical_falloff_exponent: f32,
+}
+
+impl Default for GradientFog {
+    fn default() -> Self {
+        Self { color: [0.5, 0.6, 0.7], start_distance: 0.0, end_distance: 4096.0, falloff_exponent: 1.0, height: 1000.0, vertical_falloff_exponent: 1.0 }
+    }
+}
+
+impl Component for GradientFog {
+    impl_component_any!();
+}

@@ -13,6 +13,14 @@ struct Post {
     ao: vec4<f32>,
     // x = auto exposure (1 = on), y = min exposure, z = max exposure
     tm: vec4<f32>,
+    // gradient fog: x = start, y = end (0 = off), z = falloff exponent, w = height
+    fog: vec4<f32>,
+    fog_color: vec4<f32>, // rgb, a = vertical falloff exponent
+    fog_base: vec4<f32>,  // x = fog object world Z
+    cam_pos: vec4<f32>,
+    cam_right: vec4<f32>,
+    cam_up: vec4<f32>,
+    cam_fwd: vec4<f32>,
 };
 
 @group(0) @binding(0) var hdr_tex: texture_2d<f32>;
@@ -131,6 +139,18 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     var c = textureSampleLevel(hdr_tex, hdr_samp, in.uv, 0.0).rgb;
     if (post.ao.x > 0.0) {
         c = c * ssao(vec2<i32>(in.pos.xy), vec2<f32>(textureDimensions(hdr_tex)));
+    }
+    if (post.fog.y > 0.0) {
+        let dims = vec2<f32>(textureDimensions(hdr_tex));
+        let px = vec2<i32>(in.pos.xy);
+        if (textureLoad(depth_tex, px, 0) < 0.99999) {
+            let v = view_pos(px, dims);
+            let world = post.cam_pos.xyz + post.cam_right.xyz * v.x + post.cam_up.xyz * v.y + post.cam_fwd.xyz * v.z;
+            let dist = length(v);
+            let along = pow(clamp((dist - post.fog.x) / max(post.fog.y - post.fog.x, 1.0), 0.0, 1.0), post.fog.z);
+            let below = pow(clamp(1.0 - (world.z - post.fog_base.x) / max(post.fog.w, 1.0), 0.0, 1.0), post.fog_color.a);
+            c = mix(c, post.fog_color.rgb, along * below);
+        }
     }
     if (post.dof.x > 0.0) {
         let dims = vec2<f32>(textureDimensions(hdr_tex));
