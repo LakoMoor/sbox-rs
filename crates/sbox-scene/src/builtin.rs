@@ -38,13 +38,14 @@ impl Component for CameraComponent {
 /// `ModelRenderer`, reduced to a mesh + tint until model/material loading lands.
 pub struct ModelRenderer {
     pub mesh: MeshId,
+    pub material: MaterialId,
     pub tint: [f32; 4],
     pub cast_shadows: bool,
 }
 
 impl ModelRenderer {
     pub fn new(mesh: MeshId) -> Self {
-        Self { mesh, tint: [1.0; 4], cast_shadows: true }
+        Self { mesh, material: MaterialId(0), tint: [1.0; 4], cast_shadows: true }
     }
 }
 
@@ -84,3 +85,7 @@ impl Default for PointLight {
 impl Component for PointLight {
     impl_component_any!();
 }
+
+/// Opaque handle to a material owned by the renderer (0 = default white).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+pub struct MaterialId(pub u32);

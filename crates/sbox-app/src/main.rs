@@ -98,25 +98,55 @@ impl App {
 impl App {
     /// Show a single compiled model (`.vmdl_c`) with a camera framed on its bounds.
     fn build_model_scene(scene: &mut Scene, r: &mut Renderer, path: &str) -> sbox_scene::GoId {
+        use sbox_resource::{vmat, vtex};
         let bytes = std::fs::read(path).expect("read model");
         let rm = sbox_resource::mesh::load_embedded(&bytes).expect("load model");
         log::info!("{path}: {} draw calls, bounds {:?}..{:?}", rm.draw_calls.len(), rm.mins, rm.maxs);
-        let mesh = r.upload_mesh(&MeshData::from_render_mesh(&rm));
+
+        // game directory = nearest ancestor named "game"
+        let game_dir = std::path::Path::new(path).ancestors().find(|p| p.file_name().map_or(false, |n| n == "game"));
+        let fs = game_dir.map(vmat::GameFs::from_game_dir);
+
         let center = (Vec3::from(rm.mins) + Vec3::from(rm.maxs)) * 0.5;
         let radius = ((Vec3::from(rm.maxs) - Vec3::from(rm.mins)).length() * 0.5).max(1.0);
 
-        let go = scene.create_object("model");
-        scene.set_local_transform(go, Transform::from_position(-center));
-        let mut m = ModelRenderer::new(mesh);
-        m.tint = [0.75, 0.75, 0.78, 1.0];
-        scene.add_component(go, m);
+        let root = scene.create_object("model");
+        scene.set_local_transform(root, Transform::from_position(-center));
+        let mut cache: std::collections::HashMap<String, sbox_scene::MaterialId> = Default::default();
+        for (i, dc) in rm.draw_calls.iter().enumerate() {
+            let mesh = r.upload_mesh(&MeshData::from_draw_call(dc));
+            let mat = *cache.entry(dc.material.clone()).or_insert_with(|| {
+                let Some(fs) = &fs else { return sbox_scene::MaterialId(0) };
+                let Some(data) = fs.read(&dc.material) else {
+                    log::warn!("material not found: {}", dc.material);
+                    return sbox_scene::MaterialId(0);
+                };
+                let m = match vmat::parse(&data) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        log::warn!("material {}: {e:#}", dc.material);
+                        return sbox_scene::MaterialId(0);
+                    }
+                };
+                let tex = m
+                    .color_texture()
+                    .and_then(|t| fs.read(t))
+                    .and_then(|d| vtex::parse(&d).map_err(|e| log::warn!("texture: {e:#}")).ok())
+                    .and_then(|t| r.upload_texture(&t));
+                r.create_material(tex, m.color_tint(), m.uv_scale())
+            });
+            let go = scene.create_object_in(Some(root), &format!("drawcall{i}"));
+            let mut m = ModelRenderer::new(mesh);
+            m.material = mat;
+            scene.add_component(go, m);
+        }
 
         let sun = scene.create_object("sun");
         scene.set_local_transform(sun, Transform::new(Vec3::ZERO, Angles::new(45.0, 35.0, 0.0).to_rotation(), Vec3::ONE));
         scene.add_component(sun, DirectionalLight::default());
 
         let cam = scene.create_object("camera");
-        scene.set_local_transform(cam, Transform::from_position(Vec3::new(-radius * 2.5, 0.0, 0.0)));
+        scene.set_local_transform(cam, Transform::from_position(Vec3::new(-radius * 3.0, 0.0, 0.0)));
         scene.add_component(cam, CameraComponent { z_near: (radius * 0.01).max(0.1), z_far: radius * 100.0, ..Default::default() });
         scene.add_component(cam, FlyCamera::default());
         cam

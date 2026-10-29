@@ -5,6 +5,7 @@ pub mod container;
 pub mod kv3;
 pub mod mesh;
 pub mod vbib;
+pub mod vmat;
 pub mod vtex;
 
 pub use container::{Block, Resource};

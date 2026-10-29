@@ -19,7 +19,7 @@
 | `sbox-math` | `Sandbox.System/Math` | Vec/Quat (glam), Angles, Transform, BBox, Ray, Plane |
 | `sbox-scene` | `Sandbox.Engine/Scene` | Scene/GameObject/Component, жизненный цикл, иерархия, отложенное удаление, fixed update |
 | `sbox-render` | закрытое ядро Source 2 (не в репо) | wgpu: меш, направленный + точечные источники, глубина |
-| `sbox-resource` | нативные форматы Source 2 (закрытое ядро) | контейнер `_c`, бинарный KV3 (v2), `vtex_c` (BC1-7, LZ4/ZSTD-мипы, PNG), VBIB (meshopt), меши `vmdl_c` |
+| `sbox-resource` | нативные форматы Source 2 (закрытое ядро) | контейнер `_c`, бинарный KV3 (v2), `vtex_c` (BC1-7, LZ4/ZSTD-мипы, PNG), VBIB (meshopt), меши `vmdl_c`, материалы `vmat_c` + файловый резолвер |
 | `sbox-app` | `Launcher` | демо-окно (WASD/QE, стрелки) |
 
 ## Проверено на реальных данных (game/ из artifacts.sbox.game)
@@ -32,7 +32,7 @@
 ## Дорожная карта (не сделано)
 
 1. Сериализация сцен/префабов (`*.scene`, `*.prefab` JSON) — `GameObject.Serialize.cs`
-2. Файловая система/VPK; vmat_c (материалы), внешние vmesh_c, скелет/анимации (anim_c), vsnd_c, шейдеры `.shader_c`; текстуры в рендерер
+2. VPK; внешние vmesh_c, скелет/анимации (anim_c), vsnd_c, шейдеры `.shader_c`, нормал-мапы/PBR (сейчас только g_tColor и g_vColorTint)
 3. Материалы и текстуры, тени, PBR
 4. Физика (rapier) — замена Havok-обёртки; Trace
 5. Ввод (`Input`), звук, UI (Razor/Panel → собственный layout)

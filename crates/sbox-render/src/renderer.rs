@@ -2,7 +2,8 @@ use crate::mesh::{MeshData, Vertex};
 use anyhow::{anyhow, Result};
 use bytemuck::{Pod, Zeroable};
 use sbox_math::{sbox_to_view, Mat4, RotationExt, Transform, Vec3};
-use sbox_scene::{CameraComponent, DirectionalLight, MeshId, ModelRenderer, PointLight, Scene};
+use sbox_resource::vtex::{TexFormat, Texture};
+use sbox_scene::{CameraComponent, DirectionalLight, MaterialId, MeshId, ModelRenderer, PointLight, Scene};
 use wgpu::util::DeviceExt;
 
 const MAX_POINT_LIGHTS: usize = 8;
@@ -30,6 +31,21 @@ struct ObjectUniform {
     _pad: [f32; 12], // total 192 bytes; per-object stride is aligned to the device limit
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct MaterialUniform {
+    tint: [f32; 4],
+    uv_scale: [f32; 4],
+}
+
+struct GpuMaterial {
+    bind_group: wgpu::BindGroup,
+}
+
+/// Opaque handle to a GPU texture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TextureId(pub u32);
+
 struct GpuMesh {
     vb: wgpu::Buffer,
     ib: wgpu::Buffer,
@@ -51,6 +67,11 @@ pub struct Renderer {
     object_stride: u64,
     depth_view: wgpu::TextureView,
     meshes: Vec<GpuMesh>,
+    material_layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+    textures: Vec<wgpu::TextureView>,
+    materials: Vec<GpuMaterial>,
+    bc_supported: bool,
 }
 
 impl Renderer {
@@ -64,7 +85,14 @@ impl Renderer {
         }))
         .ok_or_else(|| anyhow!("no suitable GPU adapter"))?;
         log::info!("adapter: {:?}", adapter.get_info());
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default(), None))?;
+        let bc_supported = adapter.features().contains(wgpu::Features::TEXTURE_COMPRESSION_BC);
+        let (device, queue) = pollster::block_on(adapter.request_device(
+            &wgpu::DeviceDescriptor {
+                required_features: if bc_supported { wgpu::Features::TEXTURE_COMPRESSION_BC } else { wgpu::Features::empty() },
+                ..Default::default()
+            },
+            None,
+        ))?;
 
         let (w, h) = (size.0.max(1), size.1.max(1));
         let mut config = surface.get_default_config(&adapter, w, h).ok_or_else(|| anyhow!("surface unsupported"))?;
@@ -116,9 +144,49 @@ impl Renderer {
         let object_capacity = 256;
         let (object_buf, object_bg) = Self::make_object_buffer(&device, &object_layout, object_capacity, object_stride);
 
+        let material_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("material"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Linear,
+            anisotropy_clamp: 8,
+            ..Default::default()
+        });
         let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("scene"),
-            bind_group_layouts: &[&globals_layout, &object_layout],
+            bind_group_layouts: &[&globals_layout, &object_layout, &material_layout],
             push_constant_ranges: &[],
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -163,7 +231,7 @@ impl Renderer {
         });
 
         let depth_view = Self::make_depth(&device, w, h);
-        Ok(Self {
+        let mut this = Self {
             surface,
             device,
             queue,
@@ -178,7 +246,96 @@ impl Renderer {
             object_stride,
             depth_view,
             meshes: vec![],
-        })
+            material_layout,
+            sampler,
+            textures: vec![],
+            materials: vec![],
+            bc_supported,
+        };
+        // texture 0 = white, material 0 = default white
+        let white = this.upload_rgba8(&[255, 255, 255, 255], 1, 1);
+        this.create_material(Some(white), [1.0; 4], [1.0, 1.0]);
+        Ok(this)
+    }
+
+    fn upload_rgba8(&mut self, rgba: &[u8], w: u32, h: u32) -> TextureId {
+        let tex = self.device.create_texture_with_data(
+            &self.queue,
+            &wgpu::TextureDescriptor {
+                label: Some("rgba8"),
+                size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+            wgpu::util::TextureDataOrder::LayerMajor,
+            rgba,
+        );
+        self.textures.push(tex.create_view(&Default::default()));
+        TextureId(self.textures.len() as u32 - 1)
+    }
+
+    /// Upload a Source 2 texture (sRGB colour interpretation). Returns `None` for
+    /// formats/dimensions that cannot be represented (cubemaps, HDR, non-multiple-of-4 BC, ...).
+    pub fn upload_texture(&mut self, t: &Texture) -> Option<TextureId> {
+        use wgpu::TextureFormat as F;
+        if t.is_cube() || t.depth > 1 {
+            return None;
+        }
+        if t.format.is_compressed() && (!self.bc_supported || t.width % 4 != 0 || t.height % 4 != 0) {
+            return None;
+        }
+        let format = match t.format {
+            TexFormat::Dxt1 => F::Bc1RgbaUnormSrgb,
+            TexFormat::Dxt5 => F::Bc3RgbaUnormSrgb,
+            TexFormat::Bc7 => F::Bc7RgbaUnormSrgb,
+            TexFormat::Ati1n => F::Bc4RUnorm,
+            TexFormat::Ati2n => F::Bc5RgUnorm,
+            TexFormat::Rgba8888 => F::Rgba8UnormSrgb,
+            TexFormat::Bgra8888 => F::Bgra8UnormSrgb,
+            _ => return None,
+        };
+        let data: Vec<u8> = t.mips.iter().flatten().copied().collect();
+        let tex = self.device.create_texture_with_data(
+            &self.queue,
+            &wgpu::TextureDescriptor {
+                label: Some("vtex"),
+                size: wgpu::Extent3d { width: t.width, height: t.height, depth_or_array_layers: 1 },
+                mip_level_count: t.mips.len() as u32,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+            wgpu::util::TextureDataOrder::LayerMajor,
+            &data,
+        );
+        self.textures.push(tex.create_view(&Default::default()));
+        Some(TextureId(self.textures.len() as u32 - 1))
+    }
+
+    pub fn create_material(&mut self, color: Option<TextureId>, tint: [f32; 4], uv_scale: [f32; 2]) -> MaterialId {
+        let view = &self.textures[color.map_or(0, |t| t.0 as usize)];
+        let ub = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("material"),
+            contents: bytemuck::bytes_of(&MaterialUniform { tint, uv_scale: [uv_scale[0], uv_scale[1], 0.0, 0.0] }),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("material"),
+            layout: &self.material_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                wgpu::BindGroupEntry { binding: 2, resource: ub.as_entire_binding() },
+            ],
+        });
+        self.materials.push(GpuMaterial { bind_group });
+        MaterialId(self.materials.len() as u32 - 1)
     }
 
     fn make_object_buffer(
@@ -357,7 +514,7 @@ impl Renderer {
         self.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
 
         // Gather draws.
-        let draws: Vec<(MeshId, ObjectUniform)> = scene
+        let draws: Vec<(MeshId, MaterialId, ObjectUniform)> = scene
             .iter_components::<ModelRenderer>()
             .filter(|(_, m)| (m.mesh.0 as usize) < self.meshes.len())
             .map(|(go, m)| {
@@ -365,6 +522,7 @@ impl Renderer {
                 let normal_m = model.inverse().transpose();
                 (
                     m.mesh,
+                    m.material,
                     ObjectUniform {
                         model: model.to_cols_array_2d(),
                         normal_m: normal_m.to_cols_array_2d(),
@@ -383,7 +541,7 @@ impl Renderer {
         }
         let stride = self.object_stride as usize;
         let mut staging = vec![0u8; stride * draws.len().max(1)];
-        for (i, (_, u)) in draws.iter().enumerate() {
+        for (i, (_, _, u)) in draws.iter().enumerate() {
             staging[i * stride..i * stride + std::mem::size_of::<ObjectUniform>()].copy_from_slice(bytemuck::bytes_of(u));
         }
         self.queue.write_buffer(&self.object_buf, 0, &staging);
@@ -415,9 +573,11 @@ impl Renderer {
             });
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.globals_bg, &[]);
-            for (i, (mesh, _)) in draws.iter().enumerate() {
+            for (i, (mesh, mat, _)) in draws.iter().enumerate() {
                 let m = &self.meshes[mesh.0 as usize];
                 pass.set_bind_group(1, &self.object_bg, &[(i * stride) as u32]);
+                let mi = if (mat.0 as usize) < self.materials.len() { mat.0 as usize } else { 0 };
+                pass.set_bind_group(2, &self.materials[mi].bind_group, &[]);
                 pass.set_vertex_buffer(0, m.vb.slice(..));
                 pass.set_index_buffer(m.ib.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..m.index_count, 0, 0..1);

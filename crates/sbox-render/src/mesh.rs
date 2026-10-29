@@ -89,3 +89,12 @@ impl MeshData {
         Self { vertices, indices }
     }
 }
+
+impl MeshData {
+    pub fn from_draw_call(dc: &sbox_resource::mesh::DrawCall) -> Self {
+        Self {
+            vertices: dc.vertices.iter().map(|v| Vertex { position: v.position, normal: v.normal, uv: v.uv }).collect(),
+            indices: dc.indices.clone(),
+        }
+    }
+}

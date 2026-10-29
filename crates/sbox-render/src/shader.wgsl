@@ -18,6 +18,14 @@ struct Object {
 @group(0) @binding(0) var<uniform> g: Globals;
 @group(1) @binding(0) var<uniform> obj: Object;
 
+struct Material {
+    tint: vec4<f32>,
+    uv_scale: vec4<f32>,
+};
+@group(2) @binding(0) var color_tex: texture_2d<f32>;
+@group(2) @binding(1) var color_samp: sampler;
+@group(2) @binding(2) var<uniform> mat: Material;
+
 struct VsIn {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
@@ -55,6 +63,6 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let att = clamp(1.0 - d / g.point_pos[i].w, 0.0, 1.0);
         light += g.point_color[i].rgb * max(dot(n, to_l / max(d, 0.001)), 0.0) * att * att;
     }
-    let checker = select(0.85, 1.0, ((i32(floor(in.uv.x * 8.0)) + i32(floor(in.uv.y * 8.0))) & 1) == 0);
-    return vec4<f32>(obj.tint.rgb * checker * light, obj.tint.a);
+    let albedo = textureSample(color_tex, color_samp, in.uv * mat.uv_scale.xy);
+    return vec4<f32>(obj.tint.rgb * mat.tint.rgb * albedo.rgb * light, obj.tint.a);
 }

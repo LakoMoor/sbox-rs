@@ -66,7 +66,8 @@
       <tr><td><code>sbox-scene</code></td><td>Scene / GameObject / Component, жизненный цикл, иерархия, отложенное удаление, fixed update</td><td class="ok">готово</td></tr>
       <tr><td><code>sbox-resource</code></td><td>Контейнер <code>*_c</code>, бинарный KV3, текстуры <code>vtex_c</code> (BC1–7, LZ4/ZSTD), VBIB (meshopt), меши <code>vmdl_c</code></td><td class="ok">проверено на 6878 файлах</td></tr>
       <tr><td><code>sbox-render</code></td><td>wgpu: меши, направленный и точечные источники, глубина, off-screen рендер</td><td class="ok">базовый</td></tr>
-      <tr><td>Материалы <code>vmat_c</code>, шейдеры</td><td>Текстуры в рендерере, PBR, тени</td><td class="todo">не начато</td></tr>
+      <tr><td>Материалы <code>vmat_c</code></td><td>Цвет/тинт/UV-масштаб и BC-текстуры в рендерере</td><td class="ok">базовый</td></tr>
+      <tr><td>Шейдеры, PBR, нормал-мапы, тени</td><td><code>.shader_c</code> и остальные параметры материалов</td><td class="todo">не начато</td></tr>
       <tr><td>Скелеты и анимации</td><td><code>anim_c</code>, скиннинг</td><td class="todo">не начато</td></tr>
       <tr><td>Физика, звук, ввод, сеть, UI</td><td>rapier, vsnd_c, Input, Networking, Razor</td><td class="todo">не начато</td></tr>
       <tr><td>Скриптинг</td><td>Игровой код s&amp;box написан на C# — нужно решение: Rust-API или встроенный .NET</td><td class="todo">не решено</td></tr>
