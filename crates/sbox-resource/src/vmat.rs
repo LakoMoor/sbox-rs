@@ -31,6 +31,15 @@ impl Material {
             .or_else(|| self.textures.values().next())
             .map(String::as_str)
     }
+    pub fn normal_texture(&self) -> Option<&str> {
+        self.textures.get("g_tNormal").map(String::as_str)
+    }
+    pub fn rma_texture(&self) -> Option<&str> {
+        self.textures.get("g_tRma").map(String::as_str)
+    }
+    pub fn float(&self, name: &str, default: f32) -> f32 {
+        self.floats.get(name).copied().unwrap_or(default)
+    }
     pub fn color_texture(&self) -> Option<&str> {
         self.textures.get("g_tColor").map(String::as_str)
     }

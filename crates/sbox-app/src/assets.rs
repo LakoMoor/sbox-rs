@@ -3,7 +3,7 @@
 use sbox_math::Vec3;
 use sbox_physics::{Collider, Rigidbody, Shape};
 use sbox_scene::parse_vec3;
-use sbox_render::{MeshData, Renderer};
+use sbox_render::{MaterialDesc, MeshData, Renderer};
 use sbox_resource::{model, vmat, vtex};
 use sbox_scene::{
     parse_color, CameraComponent, ComponentLoader, DirectionalLight, GoId, MaterialId, MeshId, ModelRenderer, PointLight, Scene,
@@ -60,7 +60,23 @@ impl Assets {
             .and_then(|t| fs.read(t))
             .and_then(|d| vtex::parse(&d).map_err(|e| log::warn!("texture: {e:#}")).ok())
             .and_then(|t| r.upload_texture(&t));
-        r.create_material(tex, m.color_tint(), m.uv_scale())
+        let mut load_linear = |path: Option<&str>| {
+            path.and_then(|t| fs.read(t))
+                .and_then(|d| vtex::parse(&d).map_err(|e| log::warn!("texture: {e:#}")).ok())
+                .and_then(|t| r.upload_texture_ex(&t, false))
+        };
+        let normal = load_linear(m.normal_texture());
+        let rma = load_linear(m.rma_texture());
+        r.create_material_ex(&MaterialDesc {
+            color: tex,
+            normal,
+            rma,
+            tint: m.color_tint(),
+            uv_scale: m.uv_scale(),
+            roughness: if rma.is_some() { m.float("g_flRoughnessScaleFactor", 1.0) } else { 0.7 },
+            metalness: m.float("g_flMetalness", 0.0),
+            bump: m.float("g_flBumpStrength", 1.0),
+        })
     }
 
     /// Resolve a sky material to its HDR cubemap and install it on the renderer.

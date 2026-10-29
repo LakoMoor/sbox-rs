@@ -4,4 +4,4 @@ mod mesh;
 mod renderer;
 
 pub use mesh::{MeshData, Vertex};
-pub use renderer::{Renderer, TextureId};
+pub use renderer::{MaterialDesc, Renderer, TextureId};

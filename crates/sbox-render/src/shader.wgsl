@@ -29,10 +29,13 @@ struct Object {
 struct Material {
     tint: vec4<f32>,
     uv_scale: vec4<f32>,
+    pbr: vec4<f32>, // x = roughness scale, y = metalness, z = bump strength, w = flags (1 normal, 2 rma)
 };
 @group(2) @binding(0) var color_tex: texture_2d<f32>;
 @group(2) @binding(1) var color_samp: sampler;
 @group(2) @binding(2) var<uniform> mat: Material;
+@group(2) @binding(3) var normal_tex: texture_2d<f32>;
+@group(2) @binding(4) var rma_tex: texture_2d<f32>;
 
 struct VsIn {
     @location(0) position: vec3<f32>,
@@ -107,6 +110,51 @@ fn shadow_factor(world_pos: vec3<f32>, n: vec3<f32>) -> f32 {
     return sum / 9.0;
 }
 
+// Cotangent-frame normal mapping from screen-space derivatives (vertices carry no tangents).
+fn perturb_normal(n: vec3<f32>, world_pos: vec3<f32>, uv: vec2<f32>, tn: vec3<f32>) -> vec3<f32> {
+    let dp1 = dpdx(world_pos);
+    let dp2 = dpdy(world_pos);
+    let duv1 = dpdx(uv);
+    let duv2 = dpdy(uv);
+    let dp2perp = cross(dp2, n);
+    let dp1perp = cross(n, dp1);
+    let t = dp2perp * duv1.x + dp1perp * duv2.x;
+    let b = dp2perp * duv1.y + dp1perp * duv2.y;
+    let invmax = inverseSqrt(max(dot(t, t), dot(b, b)) + 1e-20);
+    return normalize(t * invmax * tn.x + b * invmax * tn.y + n * tn.z);
+}
+
+fn distribution_ggx(n_dot_h: f32, a: f32) -> f32 {
+    let a2 = a * a;
+    let d = n_dot_h * n_dot_h * (a2 - 1.0) + 1.0;
+    return a2 / (3.14159265 * d * d + 1e-6);
+}
+
+fn geometry_smith(n_dot_v: f32, n_dot_l: f32, rough: f32) -> f32 {
+    let k = (rough + 1.0) * (rough + 1.0) / 8.0;
+    let gv = n_dot_v / (n_dot_v * (1.0 - k) + k);
+    let gl = n_dot_l / (n_dot_l * (1.0 - k) + k);
+    return gv * gl;
+}
+
+// Cook-Torrance specular + Lambert diffuse for one light. `radiance` is the incoming light colour.
+fn shade(n: vec3<f32>, v: vec3<f32>, l: vec3<f32>, radiance: vec3<f32>, albedo: vec3<f32>, rough: f32, metal: f32) -> vec3<f32> {
+    let n_dot_l = max(dot(n, l), 0.0);
+    if (n_dot_l <= 0.0) {
+        return vec3<f32>(0.0);
+    }
+    let h = normalize(v + l);
+    let n_dot_v = max(dot(n, v), 1e-4);
+    let n_dot_h = max(dot(n, h), 0.0);
+    let f0 = mix(vec3<f32>(0.04), albedo, metal);
+    let f = f0 + (vec3<f32>(1.0) - f0) * pow(1.0 - max(dot(h, v), 0.0), 5.0);
+    let d = distribution_ggx(n_dot_h, max(rough * rough, 0.02));
+    let gs = geometry_smith(n_dot_v, n_dot_l, rough);
+    let spec = d * gs * f / (4.0 * n_dot_v * n_dot_l + 1e-4);
+    let kd = (vec3<f32>(1.0) - f) * (1.0 - metal);
+    return (kd * albedo + spec * 3.14159265) * radiance * n_dot_l;
+}
+
 // Narkowicz ACES filmic fit; scene lights are HDR (values > 1).
 fn aces(x: vec3<f32>) -> vec3<f32> {
     return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), vec3<f32>(0.0), vec3<f32>(1.0));
@@ -114,18 +162,39 @@ fn aces(x: vec3<f32>) -> vec3<f32> {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    let n = normalize(in.normal);
+    let geo_n = normalize(in.normal);
+    let uv = in.uv * mat.uv_scale.xy;
+    let flags = u32(mat.pbr.w + 0.5);
+    var n = geo_n;
+    // textureSample must stay in uniform control flow, so sample unconditionally.
+    let nm = textureSample(normal_tex, color_samp, uv).xy * 2.0 - 1.0;
+    let rma = textureSample(rma_tex, color_samp, uv).rgb;
+    if ((flags & 1u) != 0u) {
+        let xy = nm * mat.pbr.z;
+        let tn = vec3<f32>(xy, sqrt(max(1.0 - dot(xy, xy), 0.0)));
+        n = perturb_normal(geo_n, in.world_pos, uv, tn);
+    }
+    var rough = mat.pbr.x;
+    var metal = mat.pbr.y;
+    var ao = 1.0;
+    if ((flags & 2u) != 0u) {
+        rough = clamp(rma.r * mat.pbr.x, 0.04, 1.0);
+        metal = clamp(rma.g, 0.0, 1.0);
+        ao = rma.b;
+    }
+    let albedo4 = textureSample(color_tex, color_samp, uv);
+    let albedo = obj.tint.rgb * mat.tint.rgb * albedo4.rgb;
+    let v = normalize(g.camera_pos.xyz - in.world_pos);
+
     // hemisphere ambient: sky from +Z (up in s&box space)
     let hemi = mix(0.6, 1.0, n.z * 0.5 + 0.5);
-    var light = g.ambient.rgb * hemi;
-    light += g.light_color.rgb * max(dot(n, -g.light_dir.xyz), 0.0) * shadow_factor(in.world_pos, n);
+    var color = g.ambient.rgb * hemi * albedo * (1.0 - metal) * ao;
+    color += shade(n, v, -g.light_dir.xyz, g.light_color.rgb, albedo, rough, metal) * shadow_factor(in.world_pos, geo_n);
     for (var i = 0u; i < g.counts.x; i = i + 1u) {
         let to_l = g.point_pos[i].xyz - in.world_pos;
         let d = length(to_l);
         let att = clamp(1.0 - d / g.point_pos[i].w, 0.0, 1.0);
-        light += g.point_color[i].rgb * max(dot(n, to_l / max(d, 0.001)), 0.0) * att * att;
+        color += shade(n, v, to_l / max(d, 0.001), g.point_color[i].rgb * att * att, albedo, rough, metal);
     }
-    let albedo = textureSample(color_tex, color_samp, in.uv * mat.uv_scale.xy);
-    let hdr = obj.tint.rgb * mat.tint.rgb * albedo.rgb * light;
-    return vec4<f32>(aces(hdr), obj.tint.a);
+    return vec4<f32>(aces(color), obj.tint.a);
 }

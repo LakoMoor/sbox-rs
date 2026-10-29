@@ -22,7 +22,7 @@ Conventions follow s&box: X forward, Y left, Z up; angles are pitch/yaw/roll in 
 | `sbox-scene` | `Sandbox.Engine/Scene` | `Scene` / `GameObject` / `Component`, s&box lifecycle order, hierarchy, deferred destroy, fixed update, systems/resources, `.scene`/`.prefab` JSON loading |
 | `sbox-physics` | Havok wrapper in the closed core | rapier-based `Rigidbody`, box/sphere/plane colliders, parent-body compound colliders, fixed-step system |
 | `sbox-resource` | closed Source 2 native core | `*_c` container, binary KV3, `vtex_c` textures (BC1-7, LZ4/ZSTD mips, PNG), VBIB vertex/index buffers (meshopt), `vmdl_c` models (multi-mesh, skeleton, skin weights), `vmat_c` materials, `anim_c` animations, `skel_c`, virtual file resolver |
-| `sbox-render` | closed Source 2 native core | wgpu renderer: meshes, GPU skinning, materials with BC textures, directional + point lights, 2048² directional shadow map with PCF, BC6H HDR cubemap sky, ACES tone mapping, off-screen rendering |
+| `sbox-render` | closed Source 2 native core | wgpu renderer: meshes, GPU skinning, materials with BC textures, directional + point lights, 2048² directional shadow map with PCF, BC6H HDR cubemap sky, ACES tone mapping, normal maps (derivative TBN), GGX specular with RMA / metalness, off-screen rendering |
 | `sbox-app` | `Launcher` | demo window / model viewer / screenshot tool |
 
 ### Verified against real game data
@@ -38,7 +38,7 @@ Checked on the `game/` directory produced by the official `Setup` step:
 ### Not done yet
 
 - Animation blending / state graphs (`vanmgrph`), root motion, additive clips, in-model (`ANIM` block) animations
-- External `vmesh_c` references, `.shader_c` shaders, PBR / normal maps
+- External `vmesh_c` references, `.shader_c` shaders (materials are approximated by a fixed PBR shader)
 - VPK, audio (`vsnd_c`), input system, networking, UI
 - Prefab instances/variables, most scene component types (only models, lights, camera, rigidbody and colliders are mapped)
 - Scripting: s&box game code is C#; it needs either a Rust API or an embedded .NET runtime
@@ -92,7 +92,7 @@ cargo run --release -p sbox-resource --example survey -- path/to/game
 ## Roadmap
 
 1. Animation graphs, additive clips, root motion; clothing (`clothing_c`) and mesh groups
-2. `vmesh_c` references, shaders, normal maps / PBR
+2. `vmesh_c` references, real shader translation
 3. VPK and a proper virtual file system
 4. Scene / prefab loading (`*.scene`, `*.prefab`)
 5. Input + character controller, audio, networking, UI

@@ -43,6 +43,28 @@ struct ObjectUniform {
 struct MaterialUniform {
     tint: [f32; 4],
     uv_scale: [f32; 4],
+    /// x = roughness scale, y = metalness, z = bump strength, w = flags (1 = normal map, 2 = RMA map)
+    pbr: [f32; 4],
+}
+
+/// Everything a surface material needs on the GPU.
+#[derive(Clone, Copy, Debug)]
+pub struct MaterialDesc {
+    pub color: Option<TextureId>,
+    pub normal: Option<TextureId>,
+    /// Roughness (R), metalness (G), ambient occlusion (B).
+    pub rma: Option<TextureId>,
+    pub tint: [f32; 4],
+    pub uv_scale: [f32; 2],
+    pub roughness: f32,
+    pub metalness: f32,
+    pub bump: f32,
+}
+
+impl Default for MaterialDesc {
+    fn default() -> Self {
+        Self { color: None, normal: None, rma: None, tint: [1.0; 4], uv_scale: [1.0; 2], roughness: 0.7, metalness: 0.0, bump: 1.0 }
+    }
 }
 
 struct GpuMaterial {
@@ -98,6 +120,7 @@ pub struct Renderer {
     materials: Vec<GpuMaterial>,
     bc_supported: bool,
     sky: Option<Sky>,
+    flat_normal: TextureId,
     shadow_view: wgpu::TextureView,
     shadow_pipeline: wgpu::RenderPipeline,
     shadow_bg: wgpu::BindGroup,
@@ -254,9 +277,21 @@ impl Renderer {
         let object_capacity = 256;
         let (object_buf, object_bg) = Self::make_object_buffer(&device, &object_layout, object_capacity, object_stride);
 
+        let tex_entry = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        };
         let material_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("material"),
             entries: &[
+                tex_entry(3),
+                tex_entry(4),
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
                     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -395,17 +430,19 @@ impl Renderer {
             materials: vec![],
             bc_supported,
             sky: None,
+            flat_normal: TextureId(0),
             shadow_view,
             shadow_pipeline,
             shadow_bg,
         };
         // texture 0 = white, material 0 = default white
-        let white = this.upload_rgba8(&[255, 255, 255, 255], 1, 1);
+        let white = this.upload_rgba8(&[255, 255, 255, 255], 1, 1, true);
+        this.flat_normal = this.upload_rgba8(&[128, 128, 255, 255], 1, 1, false);
         this.create_material(Some(white), [1.0; 4], [1.0, 1.0]);
         Ok(this)
     }
 
-    fn upload_rgba8(&mut self, rgba: &[u8], w: u32, h: u32) -> TextureId {
+    fn upload_rgba8(&mut self, rgba: &[u8], w: u32, h: u32, srgb: bool) -> TextureId {
         let tex = self.device.create_texture_with_data(
             &self.queue,
             &wgpu::TextureDescriptor {
@@ -414,7 +451,7 @@ impl Renderer {
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                format: if srgb { wgpu::TextureFormat::Rgba8UnormSrgb } else { wgpu::TextureFormat::Rgba8Unorm },
                 usage: wgpu::TextureUsages::TEXTURE_BINDING,
                 view_formats: &[],
             },
@@ -428,6 +465,11 @@ impl Renderer {
     /// Upload a Source 2 texture (sRGB colour interpretation). Returns `None` for
     /// formats/dimensions that cannot be represented (cubemaps, HDR, non-multiple-of-4 BC, ...).
     pub fn upload_texture(&mut self, t: &Texture) -> Option<TextureId> {
+        self.upload_texture_ex(t, true)
+    }
+
+    /// Like [`upload_texture`], with an explicit colour-space choice (`srgb = false` for normal / data maps).
+    pub fn upload_texture_ex(&mut self, t: &Texture, srgb: bool) -> Option<TextureId> {
         use wgpu::TextureFormat as F;
         if t.is_cube() || t.depth > 1 {
             return None;
@@ -436,13 +478,18 @@ impl Renderer {
             return None;
         }
         let format = match t.format {
-            TexFormat::Dxt1 => F::Bc1RgbaUnormSrgb,
-            TexFormat::Dxt5 => F::Bc3RgbaUnormSrgb,
-            TexFormat::Bc7 => F::Bc7RgbaUnormSrgb,
+            TexFormat::Dxt1 if srgb => F::Bc1RgbaUnormSrgb,
+            TexFormat::Dxt1 => F::Bc1RgbaUnorm,
+            TexFormat::Dxt5 if srgb => F::Bc3RgbaUnormSrgb,
+            TexFormat::Dxt5 => F::Bc3RgbaUnorm,
+            TexFormat::Bc7 if srgb => F::Bc7RgbaUnormSrgb,
+            TexFormat::Bc7 => F::Bc7RgbaUnorm,
             TexFormat::Ati1n => F::Bc4RUnorm,
             TexFormat::Ati2n => F::Bc5RgUnorm,
-            TexFormat::Rgba8888 => F::Rgba8UnormSrgb,
-            TexFormat::Bgra8888 => F::Bgra8UnormSrgb,
+            TexFormat::Rgba8888 if srgb => F::Rgba8UnormSrgb,
+            TexFormat::Rgba8888 => F::Rgba8Unorm,
+            TexFormat::Bgra8888 if srgb => F::Bgra8UnormSrgb,
+            TexFormat::Bgra8888 => F::Bgra8Unorm,
             _ => return None,
         };
         let data: Vec<u8> = t.mips.iter().flatten().copied().collect();
@@ -577,19 +624,32 @@ impl Renderer {
     }
 
     pub fn create_material(&mut self, color: Option<TextureId>, tint: [f32; 4], uv_scale: [f32; 2]) -> MaterialId {
-        let view = &self.textures[color.map_or(0, |t| t.0 as usize)];
+        self.create_material_ex(&MaterialDesc { color, tint, uv_scale, ..Default::default() })
+    }
+
+    pub fn create_material_ex(&mut self, d: &MaterialDesc) -> MaterialId {
+        let color = &self.textures[d.color.map_or(0, |t| t.0 as usize)];
+        let normal = &self.textures[d.normal.unwrap_or(self.flat_normal).0 as usize];
+        let rma = &self.textures[d.rma.map_or(0, |t| t.0 as usize)];
+        let flags = d.normal.is_some() as u32 as f32 + 2.0 * d.rma.is_some() as u32 as f32;
         let ub = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("material"),
-            contents: bytemuck::bytes_of(&MaterialUniform { tint, uv_scale: [uv_scale[0], uv_scale[1], 0.0, 0.0] }),
+            contents: bytemuck::bytes_of(&MaterialUniform {
+                tint: d.tint,
+                uv_scale: [d.uv_scale[0], d.uv_scale[1], 0.0, 0.0],
+                pbr: [d.roughness, d.metalness, d.bump, flags],
+            }),
             usage: wgpu::BufferUsages::UNIFORM,
         });
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("material"),
             layout: &self.material_layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(view) },
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(color) },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
                 wgpu::BindGroupEntry { binding: 2, resource: ub.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(normal) },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(rma) },
             ],
         });
         self.materials.push(GpuMaterial { bind_group });
