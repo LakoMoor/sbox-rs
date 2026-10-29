@@ -23,13 +23,28 @@ pub struct Button {
     pub label: Option<(TextureId, [f32; 2])>,
 }
 
+/// Single-line text input. The app rasterises `text` into `label` whenever [`Ui::take_dirty`] reports the field.
+pub struct TextField {
+    pub id: String,
+    pub rect: [f32; 4],
+    pub text: String,
+    pub max_len: usize,
+    pub color: [f32; 4],
+    pub focus_color: [f32; 4],
+    /// Rasterised `text` and its pixel size; `None` while the text is empty.
+    pub label: Option<(TextureId, [f32; 2])>,
+}
+
 pub struct Ui {
     /// 1x1 white texture that filled rectangles are tinted from.
     white: TextureId,
     pub panels: Vec<Panel>,
     pub labels: Vec<Label>,
     pub buttons: Vec<Button>,
+    pub fields: Vec<TextField>,
     hover: Option<usize>,
+    focus: Option<usize>,
+    dirty: Vec<usize>,
 }
 
 fn contains(rect: &[f32; 4], x: f32, y: f32) -> bool {
@@ -38,7 +53,7 @@ fn contains(rect: &[f32; 4], x: f32, y: f32) -> bool {
 
 impl Ui {
     pub fn new(white: TextureId) -> Self {
-        Self { white, panels: vec![], labels: vec![], buttons: vec![], hover: None }
+        Self { white, panels: vec![], labels: vec![], buttons: vec![], fields: vec![], hover: None, focus: None, dirty: vec![] }
     }
 
     /// Topmost (last added) button under the point.
@@ -56,7 +71,56 @@ impl Ui {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.panels.is_empty() && self.labels.is_empty() && self.buttons.is_empty()
+        self.panels.is_empty() && self.labels.is_empty() && self.buttons.is_empty() && self.fields.is_empty()
+    }
+
+    /// Give focus to the text field under the point (or clear it when the click lands elsewhere).
+    /// Returns whether a field now has focus.
+    pub fn focus_at(&mut self, x: f32, y: f32) -> bool {
+        self.focus = self.fields.iter().rposition(|f| contains(&f.rect, x, y));
+        self.focus.is_some()
+    }
+
+    pub fn has_focus(&self) -> bool {
+        self.focus.is_some()
+    }
+
+    pub fn focused(&self) -> Option<&TextField> {
+        self.focus.map(|i| &self.fields[i])
+    }
+
+    /// Typed character for the focused field. Control characters are ignored. Returns whether it was consumed.
+    pub fn type_char(&mut self, c: char) -> bool {
+        let Some(i) = self.focus else { return false };
+        let f = &mut self.fields[i];
+        if !c.is_control() && f.text.chars().count() < f.max_len {
+            f.text.push(c);
+            self.dirty.push(i);
+        }
+        true
+    }
+
+    pub fn backspace(&mut self) -> bool {
+        let Some(i) = self.focus else { return false };
+        if self.fields[i].text.pop().is_some() {
+            self.dirty.push(i);
+        }
+        true
+    }
+
+    /// Release focus (Escape / Enter) and return the text of the field that had it.
+    pub fn submit(&mut self) -> Option<(&str, &str)> {
+        let i = self.focus.take()?;
+        let f = &self.fields[i];
+        Some((f.id.as_str(), f.text.as_str()))
+    }
+
+    /// Fields whose text changed since the last call, so the app can re-rasterise their labels.
+    pub fn take_dirty(&mut self) -> Vec<usize> {
+        let mut d = std::mem::take(&mut self.dirty);
+        d.sort_unstable();
+        d.dedup();
+        d
     }
 
     /// Draw order: panels, buttons (with their labels), free labels.
@@ -70,6 +134,19 @@ impl Ui {
             out.push(UiRect { texture: self.white, rect: b.rect, tint });
             if let Some((tex, [w, h])) = b.label {
                 out.push(UiRect { texture: tex, rect: [b.rect[0] + (b.rect[2] - w) * 0.5, b.rect[1] + (b.rect[3] - h) * 0.5, w, h], tint: [1.0; 4] });
+            }
+        }
+        for (i, f) in self.fields.iter().enumerate() {
+            let focused = self.focus == Some(i);
+            out.push(UiRect { texture: self.white, rect: f.rect, tint: if focused { f.focus_color } else { f.color } });
+            let mut text_right = f.rect[0] + 8.0;
+            if let Some((tex, [w, h])) = f.label {
+                out.push(UiRect { texture: tex, rect: [f.rect[0] + 8.0, f.rect[1] + (f.rect[3] - h) * 0.5, w, h], tint: [1.0; 4] });
+                text_right += w;
+            }
+            if focused {
+                // Caret after the text.
+                out.push(UiRect { texture: self.white, rect: [text_right + 2.0, f.rect[1] + 8.0, 2.0, f.rect[3] - 16.0], tint: [1.0; 4] });
             }
         }
         for l in &self.labels {
@@ -108,6 +185,52 @@ mod tests {
         assert_eq!(ui.rects()[0].tint, [0.6; 4]);
         ui.set_mouse(50.0, 50.0);
         assert_eq!(ui.rects()[0].tint, [0.2; 4]);
+    }
+
+    fn field(id: &str, rect: [f32; 4]) -> TextField {
+        TextField { id: id.into(), rect, text: String::new(), max_len: 5, color: [0.1; 4], focus_color: [0.3; 4], label: None }
+    }
+
+    #[test]
+    fn typing_goes_to_the_focused_field_only() {
+        let mut ui = Ui::new(TextureId(0));
+        ui.fields.push(field("a", [0.0, 0.0, 100.0, 30.0]));
+        ui.fields.push(field("b", [0.0, 50.0, 100.0, 30.0]));
+        assert!(!ui.type_char('x'), "nothing focused yet");
+        assert!(ui.focus_at(10.0, 60.0));
+        for c in "hello world".chars() {
+            ui.type_char(c);
+        }
+        assert_eq!(ui.fields[1].text, "hello", "limited to max_len");
+        assert_eq!(ui.fields[0].text, "");
+        assert_eq!(ui.take_dirty(), vec![1]);
+        assert!(ui.take_dirty().is_empty());
+        ui.backspace();
+        assert_eq!(ui.fields[1].text, "hell");
+        ui.type_char('\n');
+        assert_eq!(ui.fields[1].text, "hell", "control characters are ignored");
+    }
+
+    #[test]
+    fn clicking_elsewhere_clears_focus_and_submit_returns_the_text() {
+        let mut ui = Ui::new(TextureId(0));
+        ui.fields.push(field("name", [0.0, 0.0, 100.0, 30.0]));
+        ui.focus_at(5.0, 5.0);
+        ui.type_char('a');
+        assert_eq!(ui.submit(), Some(("name", "a")));
+        assert!(!ui.has_focus());
+        ui.focus_at(5.0, 5.0);
+        assert!(!ui.focus_at(500.0, 500.0));
+        assert!(!ui.backspace());
+    }
+
+    #[test]
+    fn focused_field_draws_a_caret() {
+        let mut ui = Ui::new(TextureId(0));
+        ui.fields.push(field("a", [10.0, 10.0, 100.0, 30.0]));
+        assert_eq!(ui.rects().len(), 1);
+        ui.focus_at(20.0, 20.0);
+        assert_eq!(ui.rects().len(), 2);
     }
 
     #[test]

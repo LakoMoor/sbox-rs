@@ -131,7 +131,7 @@ Open, in rough order of value:
 
 1. More map entity classes (triggers, `func_*`, hinges, fog / light probe volumes); the `vents_c` format itself is decoded
 2. `ScreenSpaceReflections`, `CubemapFog`, `VolumetricFogVolume`
-3. UI beyond the basic panels / buttons: layout, text input, focus, and `ScreenPanel` / `WorldPanel` (Razor) compatibility
+3. UI beyond the basic panels / buttons / text fields: layout, scrolling, caret and selection, and `ScreenPanel` / `WorldPanel` (Razor) compatibility
 4. Real shader translation: `.shader_c` is compiled GPU bytecode, so this means re-implementing the shaders by hand per material family
 5. Networking (needs a design decision)
 6. Scripting: Rust components are the supported path; an embedded .NET runtime would be needed to run original C# unchanged

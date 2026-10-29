@@ -92,6 +92,7 @@ struct App {
     last: Instant,
     audio: Option<audio::Audio>,
     ui: Option<ui::Ui>,
+    ui_font: Option<ab_glyph::FontVec>,
     /// Cursor position in physical pixels.
     cursor: (f32, f32),
 }
@@ -159,7 +160,7 @@ impl App {
     }
 
     /// `--hud "text"` shows a label in the top-left corner; `--ui-demo` adds a panel with Play / Quit buttons.
-    fn build_ui(r: &mut Renderer, args: &[String]) -> Option<ui::Ui> {
+    fn build_ui(r: &mut Renderer, args: &[String]) -> Option<(ui::Ui, ab_glyph::FontVec)> {
         let hud = args.iter().position(|a| a == "--hud").map(|i| args.get(i + 1).map_or("sbox-rs", String::as_str));
         let demo = args.iter().any(|a| a == "--ui-demo");
         if hud.is_none() && !demo {
@@ -176,7 +177,7 @@ impl App {
             ui.labels.push(ui::Label { texture, rect: [16.0, 16.0, w, h] });
         }
         if demo {
-            ui.panels.push(ui::Panel { rect: [440.0, 220.0, 400.0, 280.0], color: [0.05, 0.06, 0.1, 0.85] });
+            ui.panels.push(ui::Panel { rect: [440.0, 220.0, 400.0, 360.0], color: [0.05, 0.06, 0.1, 0.85] });
             let (title, [tw, th]) = Self::text_texture(r, &font, "sbox-rs", 40.0);
             ui.labels.push(ui::Label { texture: title, rect: [640.0 - tw * 0.5, 245.0, tw, th] });
             for (i, (id, label)) in [("play", "Play"), ("quit", "Quit")].into_iter().enumerate() {
@@ -189,7 +190,28 @@ impl App {
                 });
             }
         }
-        Some(ui)
+        if demo {
+            ui.fields.push(ui::TextField {
+                id: "name".into(),
+                rect: [480.0, 500.0, 320.0, 44.0],
+                text: String::new(),
+                max_len: 24,
+                color: [0.1, 0.11, 0.16, 1.0],
+                focus_color: [0.16, 0.18, 0.28, 1.0],
+                label: None,
+            });
+        }
+        Some((ui, font))
+    }
+
+    /// Re-rasterise the labels of text fields that changed and refresh the overlay.
+    fn refresh_ui(&mut self) {
+        let (Some(ui), Some(font), Some(r)) = (&mut self.ui, &self.ui_font, &mut self.renderer) else { return };
+        for i in ui.take_dirty() {
+            let text = ui.fields[i].text.clone();
+            ui.fields[i].label = (!text.is_empty()).then(|| Self::text_texture(r, font, &text, 24.0));
+        }
+        r.overlay = ui.rects();
     }
 
     /// Load a compiled map: `--map maps/dev/preview_flat/world.vwrld_c --game <game dir>`.
@@ -335,7 +357,10 @@ impl ApplicationHandler for App {
         let args: Vec<String> = std::env::args().skip(1).collect();
         let model = args.iter().find(|a| !a.starts_with("--") && a.ends_with(".vmdl_c")).cloned();
         self.camera = Some(Self::build_scene(&mut self.scene, &mut renderer, model.as_deref(), args.iter().position(|a| a == "--anim").and_then(|i| args.get(i + 1)).map(String::as_str), args.iter().position(|a| a == "--scene").and_then(|i| args.get(i + 1)).map(String::as_str)));
-        self.ui = Self::build_ui(&mut renderer, &args);
+        if let Some((ui, font)) = Self::build_ui(&mut renderer, &args) {
+            self.ui = Some(ui);
+            self.ui_font = Some(font);
+        }
         if let Some(ui) = &self.ui {
             renderer.overlay = ui.rects();
         }
@@ -409,6 +434,27 @@ impl ApplicationHandler for App {
                     r.resize(s.width, s.height);
                 }
             }
+            WindowEvent::KeyboardInput { event, .. } if self.ui.as_ref().is_some_and(ui::Ui::has_focus) => {
+                if event.state == ElementState::Pressed {
+                    let ui = self.ui.as_mut().unwrap();
+                    match &event.logical_key {
+                        winit::keyboard::Key::Named(winit::keyboard::NamedKey::Backspace) => {
+                            ui.backspace();
+                        }
+                        winit::keyboard::Key::Named(winit::keyboard::NamedKey::Enter | winit::keyboard::NamedKey::Escape) => {
+                            if let Some((id, text)) = ui.submit() {
+                                log::info!("ui: {id} = {text:?}");
+                            }
+                        }
+                        _ => {
+                            for c in event.text.as_deref().unwrap_or("").chars() {
+                                ui.type_char(c);
+                            }
+                        }
+                    }
+                    self.refresh_ui();
+                }
+            }
             WindowEvent::KeyboardInput { event, .. } => {
                 let down = event.state == ElementState::Pressed;
                 if let PhysicalKey::Code(code) = event.physical_key {
@@ -471,6 +517,10 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
+                if let Some(ui) = &mut self.ui {
+                    ui.focus_at(self.cursor.0, self.cursor.1);
+                }
+                self.refresh_ui();
                 if let Some(id) = self.ui.as_ref().and_then(|ui| ui.click(self.cursor.0, self.cursor.1)) {
                     log::info!("ui: clicked {id}");
                     if id == "quit" {
@@ -514,7 +564,7 @@ fn main() -> anyhow::Result<()> {
     env_logger::init();
     let el = EventLoop::new()?;
     el.set_control_flow(ControlFlow::Poll);
-    let mut app = App { window: None, renderer: None, scene: Scene::new(), camera: None, last: Instant::now(), audio: None, ui: None, cursor: (0.0, 0.0) };
+    let mut app = App { window: None, renderer: None, scene: Scene::new(), camera: None, last: Instant::now(), audio: None, ui: None, ui_font: None, cursor: (0.0, 0.0) };
     el.run_app(&mut app)?;
     Ok(())
 }
