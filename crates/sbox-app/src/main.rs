@@ -1,6 +1,7 @@
 mod assets;
 mod audio;
 mod game;
+mod layout;
 mod meshcomp;
 mod particles;
 mod text;
@@ -177,23 +178,26 @@ impl App {
             ui.labels.push(ui::Label { texture, rect: [16.0, 16.0, w, h] });
         }
         if demo {
-            ui.panels.push(ui::Panel { rect: [440.0, 220.0, 400.0, 360.0], color: [0.05, 0.06, 0.1, 0.85] });
+            // A 400x360 panel centred on a 1280x720 screen, laid out as a column: title, two buttons, a text field.
+            let panel = [440.0, 180.0, 400.0, 360.0];
+            ui.panels.push(ui::Panel { rect: panel, color: [0.05, 0.06, 0.1, 0.85] });
+            let column = layout::Stack { axis: layout::Axis::Column, padding: 40.0, gap: 24.0, align: layout::Align::Stretch };
+            use layout::Size::Fixed;
+            let rects = column.place(panel, &[(Fixed(48.0), None), (Fixed(56.0), None), (Fixed(56.0), None), (Fixed(44.0), None)]);
             let (title, [tw, th]) = Self::text_texture(r, &font, "sbox-rs", 40.0);
-            ui.labels.push(ui::Label { texture: title, rect: [640.0 - tw * 0.5, 245.0, tw, th] });
+            ui.labels.push(ui::Label { texture: title, rect: [rects[0][0] + (rects[0][2] - tw) * 0.5, rects[0][1] + (rects[0][3] - th) * 0.5, tw, th] });
             for (i, (id, label)) in [("play", "Play"), ("quit", "Quit")].into_iter().enumerate() {
                 ui.buttons.push(ui::Button {
                     id: id.into(),
-                    rect: [480.0, 330.0 + i as f32 * 80.0, 320.0, 56.0],
+                    rect: rects[1 + i],
                     color: [0.18, 0.2, 0.3, 1.0],
                     hover_color: [0.3, 0.4, 0.7, 1.0],
                     label: Some(Self::text_texture(r, &font, label, 28.0)),
                 });
             }
-        }
-        if demo {
             ui.fields.push(ui::TextField {
                 id: "name".into(),
-                rect: [480.0, 500.0, 320.0, 44.0],
+                rect: rects[3],
                 text: String::new(),
                 max_len: 24,
                 color: [0.1, 0.11, 0.16, 1.0],
