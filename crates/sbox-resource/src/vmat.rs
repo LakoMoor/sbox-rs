@@ -23,6 +23,14 @@ impl Material {
     pub fn uv_scale(&self) -> [f32; 2] {
         self.vectors.get("g_vTexCoordScale").map_or([1.0, 1.0], |v| [v[0], v[1]])
     }
+    /// Texture of a sky material (`SkyTexture`), falling back to the first texture parameter.
+    pub fn sky_texture(&self) -> Option<&str> {
+        self.textures
+            .get("SkyTexture")
+            .or_else(|| self.textures.get("g_tSkyTexture"))
+            .or_else(|| self.textures.values().next())
+            .map(String::as_str)
+    }
     pub fn color_texture(&self) -> Option<&str> {
         self.textures.get("g_tColor").map(String::as_str)
     }

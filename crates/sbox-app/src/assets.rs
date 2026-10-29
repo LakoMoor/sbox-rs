@@ -63,6 +63,28 @@ impl Assets {
         r.create_material(tex, m.color_tint(), m.uv_scale())
     }
 
+    /// Resolve a sky material to its HDR cubemap and install it on the renderer.
+    pub fn load_sky(&mut self, r: &mut Renderer, material: &str, tint: [f32; 4]) {
+        let Some(fs) = &self.fs else { return };
+        let Some(m) = fs.read(material).and_then(|d| vmat::parse(&d).ok()) else {
+            log::warn!("sky material not found: {material}");
+            return;
+        };
+        let Some(tex_path) = m.sky_texture() else {
+            log::warn!("sky material {material} has no texture");
+            return;
+        };
+        match fs.read(tex_path).map(|d| vtex::parse(&d)) {
+            Some(Ok(t)) => {
+                if !r.set_skybox(&t, 1.0, tint) {
+                    log::warn!("sky texture {tex_path}: unsupported ({:?}, cube={})", t.format, t.is_cube());
+                }
+            }
+            Some(Err(e)) => log::warn!("sky texture {tex_path}: {e:#}"),
+            None => log::warn!("sky texture not found: {tex_path}"),
+        }
+    }
+
     pub fn load_model_bytes(&mut self, r: &mut Renderer, key: &str, bytes: &[u8]) -> Option<Rc<LoadedModel>> {
         if let Some(m) = self.models.get(key) {
             return m.clone();
@@ -154,7 +176,14 @@ impl ComponentLoader for SceneLoader<'_> {
                 true
             }
             // Post-processing / environment components with no renderer support yet; accepted so they are not reported as unknown.
-            "Bloom" | "EnvmapProbe" | "SkyBox2D" => true,
+            "SkyBox2D" => {
+                let tint = parse_color(p.get("Tint"), [1.0; 4]);
+                if let Some(mat) = p.get("SkyMaterial").and_then(Value::as_str) {
+                    self.assets.load_sky(self.r, mat, tint);
+                }
+                true
+            }
+            "Bloom" | "EnvmapProbe" => true,
             "DirectionalLight" => {
                 let c = parse_color(p.get("LightColor"), [1.0; 4]);
                 let a = parse_color(p.get("SkyColor"), [0.15, 0.17, 0.2, 1.0]);

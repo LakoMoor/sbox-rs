@@ -48,6 +48,23 @@ struct GpuMaterial {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TextureId(pub u32);
 
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct SkyUniform {
+    inv_view_proj: [[f32; 4]; 4],
+    camera_pos: [f32; 4],
+    params: [f32; 4],
+    tint: [f32; 4],
+}
+
+struct Sky {
+    pipeline: wgpu::RenderPipeline,
+    bind_group: wgpu::BindGroup,
+    ub: wgpu::Buffer,
+    exposure: f32,
+    tint: [f32; 4],
+}
+
 struct GpuMesh {
     vb: wgpu::Buffer,
     ib: wgpu::Buffer,
@@ -75,6 +92,7 @@ pub struct Renderer {
     textures: Vec<wgpu::TextureView>,
     materials: Vec<GpuMaterial>,
     bc_supported: bool,
+    sky: Option<Sky>,
 }
 
 impl Renderer {
@@ -276,6 +294,7 @@ impl Renderer {
             textures: vec![],
             materials: vec![],
             bc_supported,
+            sky: None,
         };
         // texture 0 = white, material 0 = default white
         let white = this.upload_rgba8(&[255, 255, 255, 255], 1, 1);
@@ -341,6 +360,117 @@ impl Renderer {
         );
         self.textures.push(tex.create_view(&Default::default()));
         Some(TextureId(self.textures.len() as u32 - 1))
+    }
+
+    /// Install a HDR (BC6H) cubemap as the sky, drawn behind everything. Returns false if unsupported.
+    pub fn set_skybox(&mut self, t: &Texture, exposure: f32, tint: [f32; 4]) -> bool {
+        if !t.is_cube() || t.format != TexFormat::Bc6h || !self.bc_supported || t.width % 4 != 0 {
+            return false;
+        }
+        // wgpu wants layer-major order: for each face, all mips.
+        let faces = 6usize;
+        let mut data = Vec::new();
+        for f in 0..faces {
+            for (level, m) in t.mips.iter().enumerate() {
+                let (w, h) = t.mip_size(level);
+                let one = TexFormat::Bc6h.image_size(w, h).unwrap();
+                data.extend_from_slice(&m[f * one..(f + 1) * one]);
+            }
+        }
+        let tex = self.device.create_texture_with_data(
+            &self.queue,
+            &wgpu::TextureDescriptor {
+                label: Some("sky"),
+                size: wgpu::Extent3d { width: t.width, height: t.height, depth_or_array_layers: 6 },
+                mip_level_count: t.mips.len() as u32,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Bc6hRgbUfloat,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+            wgpu::util::TextureDataOrder::LayerMajor,
+            &data,
+        );
+        let view = tex.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::Cube),
+            ..Default::default()
+        });
+        let layout = self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("sky"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::Cube,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let ub = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("sky"),
+            size: std::mem::size_of::<SkyUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("sky"),
+            layout: &layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: ub.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+            ],
+        });
+        let shader = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("sky"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("sky.wgsl").into()),
+        });
+        let pl = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("sky"),
+            bind_group_layouts: &[&layout],
+            push_constant_ranges: &[],
+        });
+        let pipeline = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("sky"),
+            layout: Some(&pl),
+            vertex: wgpu::VertexState { module: &shader, entry_point: Some("vs_main"), compilation_options: Default::default(), buffers: &[] },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState { format: self.config.format, blend: None, write_mask: wgpu::ColorWrites::ALL })],
+            }),
+            primitive: Default::default(),
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::Always,
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: Default::default(),
+            multiview: None,
+            cache: None,
+        });
+        self.sky = Some(Sky { pipeline, bind_group, ub, exposure, tint });
+        true
     }
 
     pub fn create_material(&mut self, color: Option<TextureId>, tint: [f32; 4], uv_scale: [f32; 2]) -> MaterialId {
@@ -537,6 +667,15 @@ impl Renderer {
         }
         globals.counts[0] = np as u32;
         self.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
+        if let Some(sky) = &self.sky {
+            let u = SkyUniform {
+                inv_view_proj: view_proj.inverse().to_cols_array_2d(),
+                camera_pos: [cam_xf.position.x, cam_xf.position.y, cam_xf.position.z, 1.0],
+                params: [sky.exposure, 0.0, 0.0, 0.0],
+                tint: sky.tint,
+            };
+            self.queue.write_buffer(&sky.ub, 0, bytemuck::bytes_of(&u));
+        }
 
         // Gather draws.
         let mut bone_mats: Vec<[[f32; 4]; 4]> = Vec::new();
@@ -606,6 +745,11 @@ impl Renderer {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
+            if let Some(sky) = &self.sky {
+                pass.set_pipeline(&sky.pipeline);
+                pass.set_bind_group(0, &sky.bind_group, &[]);
+                pass.draw(0..3, 0..1);
+            }
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.globals_bg, &[]);
             for (i, (mesh, mat, _)) in draws.iter().enumerate() {

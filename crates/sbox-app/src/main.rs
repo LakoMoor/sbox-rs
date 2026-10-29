@@ -239,6 +239,12 @@ impl ApplicationHandler for App {
             for _ in 0..(secs * 60.0) as u32 {
                 self.scene.tick(1.0 / 60.0);
             }
+            if let (Some(c), Some(pitch)) = (self.camera, args.iter().position(|a| a == "--cam-pitch").and_then(|j| args.get(j + 1)).and_then(|v| v.parse::<f32>().ok())) {
+                let mut t = self.scene.world_transform(c);
+                let a = t.rotation.angles();
+                t.rotation = Angles::new(pitch, a.yaw, 0.0).to_rotation();
+                self.scene.set_world_transform(c, t);
+            }
             if let Some(c) = self.camera {
                 let t = self.scene.world_transform(c);
                 log::info!("camera at {:?} angles {:?}", t.position, t.rotation.angles());
