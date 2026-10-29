@@ -297,6 +297,10 @@ impl ComponentLoader for SceneLoader<'_> {
                 scene.add_component(go, sbox_scene::Tonemapping { mode, exposure_compensation: ev });
                 true
             }
+            "Sharpen" => {
+                scene.add_component(go, sbox_scene::Sharpen { scale: p.get("Scale").and_then(Value::as_f64).unwrap_or(0.25) as f32 });
+                true
+            }
             "Vignette" => {
                 let f = |k: &str, d: f64| p.get(k).and_then(Value::as_f64).unwrap_or(d) as f32;
                 scene.add_component(go, sbox_scene::Vignette { intensity: f("Intensity", 1.0), smoothness: f("Smoothness", 1.0), roundness: f("Roundness", 1.0) });

@@ -65,6 +65,10 @@ fn load_object(scene: &mut Scene, parent: Option<GoId>, j: &Value, loader: &mut 
     }
     for c in j.get("Components").and_then(Value::as_array).into_iter().flatten() {
         let Some(ty) = c.get("__type").and_then(Value::as_str) else { continue };
+        // Components saved as disabled are not instantiated.
+        if c.get("__enabled").and_then(Value::as_bool) == Some(false) {
+            continue;
+        }
         if loader.create(scene, go, ty, c) {
             stats.components += 1;
         } else {

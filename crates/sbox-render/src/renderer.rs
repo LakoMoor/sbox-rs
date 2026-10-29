@@ -3,7 +3,7 @@ use anyhow::{anyhow, Result};
 use bytemuck::{Pod, Zeroable};
 use sbox_math::{sbox_to_view, Mat4, RotationExt, Transform, Vec3};
 use sbox_resource::vtex::{TexFormat, Texture};
-use sbox_scene::{TonemapMode, Tonemapping, Bloom, Vignette, CameraComponent, DirectionalLight, MaterialId, MeshId, ModelRenderer, PointLight, Scene, SpotLight};
+use sbox_scene::{Sharpen, TonemapMode, Tonemapping, Bloom, Vignette, CameraComponent, DirectionalLight, MaterialId, MeshId, ModelRenderer, PointLight, Scene, SpotLight};
 use wgpu::util::DeviceExt;
 
 const MAX_POINT_LIGHTS: usize = 8;
@@ -85,6 +85,7 @@ struct PostUniform {
     params: [f32; 4],
     bloom_tint: [f32; 4],
     extra: [f32; 4],
+    fx: [f32; 4],
 }
 
 /// A textured screen-space rectangle drawn over the finished frame (`rect` = x, y, width, height in pixels, origin top-left).
@@ -1181,6 +1182,7 @@ impl Renderer {
             let bloom = scene.iter_components::<Bloom>().next().map(|(_, b)| b);
             let vig = scene.iter_components::<Vignette>().next().map(|(_, v)| v);
             let tm = scene.iter_components::<Tonemapping>().next().map(|(_, t)| t);
+            let sharpen = scene.iter_components::<Sharpen>().next().map_or(0.0, |(_, s)| s.scale);
             let post = PostUniform {
                 params: [bloom.map_or(0.0, |b| b.strength), bloom.map_or(1.0, |b| b.threshold), vig.map_or(0.0, |v| v.intensity), vig.map_or(1.0, |v| v.smoothness)],
                 bloom_tint: {
@@ -1188,6 +1190,7 @@ impl Renderer {
                     [t[0], t[1], t[2], tm.map_or(1.0, |t| t.exposure_compensation.exp2())]
                 },
                 extra: [vig.map_or(0.0, |v| v.roundness), aspect, 0.03, tm.map_or(0.0, |t| match t.mode { TonemapMode::Aces => 0.0, TonemapMode::AgX => 1.0, TonemapMode::Reinhard => 2.0 })],
+                fx: [sharpen, 1.0 / size.0 as f32, 1.0 / size.1 as f32, 0.0],
             };
             self.queue.write_buffer(&self.post_buf, 0, bytemuck::bytes_of(&post));
             let mut ui_groups = Vec::new();

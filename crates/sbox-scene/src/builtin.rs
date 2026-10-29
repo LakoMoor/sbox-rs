@@ -168,3 +168,18 @@ impl Default for Tonemapping {
 impl Component for Tonemapping {
     impl_component_any!();
 }
+
+/// Unsharp-mask style sharpening of the final image.
+pub struct Sharpen {
+    pub scale: f32,
+}
+
+impl Default for Sharpen {
+    fn default() -> Self {
+        Self { scale: 0.25 }
+    }
+}
+
+impl Component for Sharpen {
+    impl_component_any!();
+}

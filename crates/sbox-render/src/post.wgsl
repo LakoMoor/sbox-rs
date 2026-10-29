@@ -4,6 +4,8 @@ struct Post {
     bloom_tint: vec4<f32>, // rgb = bloom tint, a = exposure multiplier
     // x = vignette roundness, y = aspect ratio, z = bloom radius in uv units, w = tonemap mode (0 ACES, 1 AgX, 2 Reinhard)
     extra: vec4<f32>,
+    // x = sharpen scale (0 = off), yz = texel size in uv units
+    fx: vec4<f32>,
 };
 
 @group(0) @binding(0) var hdr_tex: texture_2d<f32>;
@@ -65,6 +67,14 @@ fn tonemap(c: vec3<f32>, mode: f32) -> vec3<f32> {
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     var c = textureSampleLevel(hdr_tex, hdr_samp, in.uv, 0.0).rgb;
+    if (post.fx.x > 0.0) {
+        let t = post.fx.yz;
+        let n = textureSampleLevel(hdr_tex, hdr_samp, in.uv + vec2<f32>(0.0, -t.y), 0.0).rgb
+            + textureSampleLevel(hdr_tex, hdr_samp, in.uv + vec2<f32>(0.0, t.y), 0.0).rgb
+            + textureSampleLevel(hdr_tex, hdr_samp, in.uv + vec2<f32>(-t.x, 0.0), 0.0).rgb
+            + textureSampleLevel(hdr_tex, hdr_samp, in.uv + vec2<f32>(t.x, 0.0), 0.0).rgb;
+        c = max(c + (c - n * 0.25) * post.fx.x, vec3<f32>(0.0));
+    }
     if (post.params.x > 0.0) {
         var acc = vec3<f32>(0.0);
         let r = post.extra.z;
