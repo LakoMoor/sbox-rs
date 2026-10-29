@@ -103,6 +103,7 @@ struct App {
     cursor: (f32, f32),
     net: Option<Net>,
     mods: winit::keyboard::ModifiersState,
+    player_mesh: Option<sbox_scene::MeshId>,
 }
 
 /// `--host <addr>` serves the physics props to clients; `--join <addr>` mirrors a server's props.
@@ -319,6 +320,28 @@ impl App {
                 sbox_net::replication::apply(&mut self.scene, client, 0.3);
             }
             None => {}
+        }
+        self.attach_player_models();
+    }
+
+    /// Give every networked player object (host and clients) a visible box body, coloured by its id.
+    fn attach_player_models(&mut self) {
+        use sbox_net::replication::{NetworkId, PLAYER_ID_BASE};
+        let Some(r) = &mut self.renderer else { return };
+        let bare: Vec<_> = self
+            .scene
+            .iter_components::<NetworkId>()
+            .filter(|(go, n)| n.0 >= PLAYER_ID_BASE && self.scene.component::<ModelRenderer>(*go).is_none())
+            .map(|(go, n)| (go, n.0))
+            .collect();
+        for (go, id) in bare {
+            let mesh = *self.player_mesh.get_or_insert_with(|| r.upload_mesh(&MeshData::cuboid(Vec3::new(32.0, 32.0, 72.0))));
+            let mut m = ModelRenderer::new(mesh);
+            // A stable, distinct hue per player.
+            let h = (id - PLAYER_ID_BASE) as f32 * 0.618_034;
+            let c = |o: f32| 0.55 + 0.45 * ((h + o).fract() * std::f32::consts::TAU).cos();
+            m.tint = [c(0.0), c(0.33), c(0.66), 1.0];
+            self.scene.add_component(go, m);
         }
     }
 
@@ -720,7 +743,7 @@ fn main() -> anyhow::Result<()> {
     env_logger::init();
     let el = EventLoop::new()?;
     el.set_control_flow(ControlFlow::Poll);
-    let mut app = App { window: None, renderer: None, scene: Scene::new(), camera: None, last: Instant::now(), audio: None, ui: None, ui_font: None, cursor: (0.0, 0.0), net: None, mods: Default::default() };
+    let mut app = App { window: None, renderer: None, scene: Scene::new(), camera: None, last: Instant::now(), audio: None, ui: None, ui_font: None, cursor: (0.0, 0.0), net: None, mods: Default::default(), player_mesh: None };
     el.run_app(&mut app)?;
     Ok(())
 }
