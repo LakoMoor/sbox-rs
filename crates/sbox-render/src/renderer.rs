@@ -9,6 +9,9 @@ use wgpu::util::DeviceExt;
 const MAX_POINT_LIGHTS: usize = 8;
 const MAX_BONES: usize = 32768;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+const SHADOW_SIZE: u32 = 2048;
+/// Half-extent (world units) of the directional shadow volume centred on the camera.
+const SHADOW_RADIUS: f32 = 1800.0;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -21,6 +24,8 @@ struct Globals {
     point_pos: [[f32; 4]; MAX_POINT_LIGHTS],
     point_color: [[f32; 4]; MAX_POINT_LIGHTS],
     counts: [u32; 4],
+    light_vp: [[f32; 4]; 4],
+    shadow: [f32; 4], // x = enabled, y = 1 / map size
 }
 
 #[repr(C)]
@@ -93,6 +98,9 @@ pub struct Renderer {
     materials: Vec<GpuMaterial>,
     bc_supported: bool,
     sky: Option<Sky>,
+    shadow_view: wgpu::TextureView,
+    shadow_pipeline: wgpu::RenderPipeline,
+    shadow_bg: wgpu::BindGroup,
 }
 
 impl Renderer {
@@ -152,6 +160,38 @@ impl Renderer {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                    count: None,
+                },
+            ],
+        });
+        let shadow_globals_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("shadow globals"),
+            entries: &[
+                uniform_entry(false),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
         let object_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -171,9 +211,37 @@ impl Renderer {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let shadow_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("shadow map"),
+            size: wgpu::Extent3d { width: SHADOW_SIZE, height: SHADOW_SIZE, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: DEPTH_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let shadow_view = shadow_tex.create_view(&Default::default());
+        let shadow_samp = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("shadow"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            compare: Some(wgpu::CompareFunction::LessEqual),
+            ..Default::default()
+        });
         let globals_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("globals"),
             layout: &globals_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: globals_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: bones_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&shadow_view) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&shadow_samp) },
+            ],
+        });
+        let shadow_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("shadow globals"),
+            layout: &shadow_globals_layout,
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: globals_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: bones_buf.as_entire_binding() },
@@ -272,6 +340,38 @@ impl Renderer {
             cache: None,
         });
 
+        let shadow_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("shadow"),
+            bind_group_layouts: &[&shadow_globals_layout, &object_layout],
+            push_constant_ranges: &[],
+        });
+        let shadow_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("shadow"),
+            layout: Some(&shadow_pl),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_shadow"),
+                compilation_options: Default::default(),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<Vertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Uint8x4, 4 => Float32x4],
+                }],
+            },
+            fragment: None,
+            primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: Default::default(),
+                bias: wgpu::DepthBiasState { constant: 2, slope_scale: 2.0, clamp: 0.0 },
+            }),
+            multisample: Default::default(),
+            multiview: None,
+            cache: None,
+        });
+
         let depth_view = Self::make_depth(&device, w, h);
         let mut this = Self {
             surface,
@@ -295,6 +395,9 @@ impl Renderer {
             materials: vec![],
             bc_supported,
             sky: None,
+            shadow_view,
+            shadow_pipeline,
+            shadow_bg,
         };
         // texture 0 = white, material 0 = default white
         let white = this.upload_rgba8(&[255, 255, 255, 255], 1, 1);
@@ -656,6 +759,16 @@ impl Renderer {
             let d = scene.world_transform(go).rotation.forward();
             globals.light_dir = [d.x, d.y, d.z, 0.0];
             globals.light_color = [l.color[0], l.color[1], l.color[2], 1.0];
+            let dir = Vec3::new(d.x, d.y, d.z).normalize_or_zero();
+            if dir != Vec3::ZERO {
+                let up = if dir.z.abs() > 0.99 { Vec3::X } else { Vec3::Z };
+                let center = cam_xf.position;
+                let eye = center - dir * SHADOW_RADIUS * 2.0;
+                let view = Mat4::look_to_rh(eye, dir, up);
+                let proj = Mat4::orthographic_rh(-SHADOW_RADIUS, SHADOW_RADIUS, -SHADOW_RADIUS, SHADOW_RADIUS, 0.0, SHADOW_RADIUS * 4.0);
+                globals.light_vp = (proj * view).to_cols_array_2d();
+                globals.shadow = [1.0, 1.0 / SHADOW_SIZE as f32, 0.0, 0.0];
+            }
             globals.ambient = [l.ambient[0], l.ambient[1], l.ambient[2], 0.0];
         }
         let mut np = 0;
@@ -679,6 +792,11 @@ impl Renderer {
 
         // Gather draws.
         let mut bone_mats: Vec<[[f32; 4]; 4]> = Vec::new();
+        let casts: Vec<bool> = scene
+            .iter_components::<ModelRenderer>()
+            .filter(|(_, m)| (m.mesh.0 as usize) < self.meshes.len())
+            .map(|(_, m)| m.cast_shadows)
+            .collect();
         let draws: Vec<(MeshId, MaterialId, ObjectUniform)> = scene
             .iter_components::<ModelRenderer>()
             .filter(|(_, m)| (m.mesh.0 as usize) < self.meshes.len())
@@ -721,6 +839,31 @@ impl Renderer {
         self.queue.write_buffer(&self.object_buf, 0, &staging);
 
         let mut enc = self.device.create_command_encoder(&Default::default());
+        if globals.shadow[0] > 0.0 {
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("shadow"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.shadow_view,
+                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.shadow_pipeline);
+            pass.set_bind_group(0, &self.shadow_bg, &[]);
+            for (i, (mesh, _, _)) in draws.iter().enumerate() {
+                if !casts[i] {
+                    continue;
+                }
+                let m = &self.meshes[mesh.0 as usize];
+                pass.set_bind_group(1, &self.object_bg, &[(i * stride) as u32]);
+                pass.set_vertex_buffer(0, m.vb.slice(..));
+                pass.set_index_buffer(m.ib.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..m.index_count, 0, 0..1);
+            }
+        }
         {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("main"),

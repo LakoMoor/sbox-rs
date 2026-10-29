@@ -7,6 +7,8 @@ struct Globals {
     point_pos: array<vec4<f32>, 8>,   // xyz, radius
     point_color: array<vec4<f32>, 8>, // rgb * intensity
     counts: vec4<u32>,                // x = point light count
+    light_vp: mat4x4<f32>,
+    shadow: vec4<f32>,                // x = enabled, y = 1 / map size
 };
 
 struct Object {
@@ -20,6 +22,8 @@ struct Object {
 
 @group(0) @binding(0) var<uniform> g: Globals;
 @group(0) @binding(1) var<storage, read> bones: array<mat4x4<f32>>;
+@group(0) @binding(2) var shadow_tex: texture_depth_2d;
+@group(0) @binding(3) var shadow_samp: sampler_comparison;
 @group(1) @binding(0) var<uniform> obj: Object;
 
 struct Material {
@@ -67,6 +71,42 @@ fn vs_main(in: VsIn) -> VsOut {
     return out;
 }
 
+@vertex
+fn vs_shadow(in: VsIn) -> @builtin(position) vec4<f32> {
+    var pos = vec4<f32>(in.position, 1.0);
+    if (obj.params.y != 0u) {
+        let b = obj.params.x;
+        let skin = bones[b + in.joints.x] * in.weights.x
+                 + bones[b + in.joints.y] * in.weights.y
+                 + bones[b + in.joints.z] * in.weights.z
+                 + bones[b + in.joints.w] * in.weights.w;
+        pos = skin * pos;
+    }
+    return g.light_vp * (obj.model * pos);
+}
+
+// 3x3 PCF directional shadow; returns 1 when fully lit.
+fn shadow_factor(world_pos: vec3<f32>, n: vec3<f32>) -> f32 {
+    if (g.shadow.x < 0.5) {
+        return 1.0;
+    }
+    let offset_pos = world_pos + n * 1.5;
+    let lp = g.light_vp * vec4<f32>(offset_pos, 1.0);
+    let ndc = lp.xyz / lp.w;
+    let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 1.0 - (ndc.y * 0.5 + 0.5));
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || ndc.z > 1.0) {
+        return 1.0;
+    }
+    var sum = 0.0;
+    for (var dx = -1; dx <= 1; dx = dx + 1) {
+        for (var dy = -1; dy <= 1; dy = dy + 1) {
+            let o = vec2<f32>(f32(dx), f32(dy)) * g.shadow.y;
+            sum += textureSampleCompareLevel(shadow_tex, shadow_samp, uv + o, ndc.z);
+        }
+    }
+    return sum / 9.0;
+}
+
 // Narkowicz ACES filmic fit; scene lights are HDR (values > 1).
 fn aces(x: vec3<f32>) -> vec3<f32> {
     return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), vec3<f32>(0.0), vec3<f32>(1.0));
@@ -78,7 +118,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // hemisphere ambient: sky from +Z (up in s&box space)
     let hemi = mix(0.6, 1.0, n.z * 0.5 + 0.5);
     var light = g.ambient.rgb * hemi;
-    light += g.light_color.rgb * max(dot(n, -g.light_dir.xyz), 0.0);
+    light += g.light_color.rgb * max(dot(n, -g.light_dir.xyz), 0.0) * shadow_factor(in.world_pos, n);
     for (var i = 0u; i < g.counts.x; i = i + 1u) {
         let to_l = g.point_pos[i].xyz - in.world_pos;
         let d = length(to_l);
