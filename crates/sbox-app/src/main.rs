@@ -138,6 +138,22 @@ impl App {
 }
 
 impl App {
+    /// Draw a text label in the top-left corner as a screen-space overlay (`--hud "text"`).
+    /// The font comes from the `game/` directory found in any path argument.
+    fn add_hud(r: &mut Renderer, args: &[String], text: &str) {
+        let game = args.iter().flat_map(|a| std::path::Path::new(a).ancestors().map(std::path::Path::to_path_buf).collect::<Vec<_>>()).find(|p| p.file_name().is_some_and(|n| n == "game"));
+        let fs = game.map(sbox_resource::vmat::GameFs::from_game_dir);
+        let font = fs.as_ref().and_then(|fs| text::font_files("Poppins", 600, false).iter().find_map(|p| fs.read_raw(p))).and_then(|d| ab_glyph::FontVec::try_from_vec(d).ok());
+        let Some(font) = font else {
+            log::warn!("--hud: no font found (pass a path inside the game directory)");
+            return;
+        };
+        let st = text::TextStyle { text: text.to_string(), color: [1.0; 4], font: "Poppins".into(), size: 28.0, weight: 600, italic: false, line_height: 1.0, align: -1, scale: 1.0 };
+        let (img, w, h) = text::rasterise(&font, &st);
+        let tex = r.upload_rgba8(&img, w, h, true);
+        r.overlay.push(sbox_render::UiRect { texture: tex, rect: [16.0, 16.0, w as f32, h as f32], tint: [1.0; 4] });
+    }
+
     /// Load a compiled map: `--map maps/dev/preview_flat/world.vwrld_c --game <game dir>`.
     fn build_map_scene(scene: &mut Scene, r: &mut Renderer, world: &str) -> sbox_scene::GoId {
         use sbox_resource::vmat;
@@ -275,6 +291,9 @@ impl ApplicationHandler for App {
         let args: Vec<String> = std::env::args().skip(1).collect();
         let model = args.iter().find(|a| !a.starts_with("--") && a.ends_with(".vmdl_c")).cloned();
         self.camera = Some(Self::build_scene(&mut self.scene, &mut renderer, model.as_deref(), args.iter().position(|a| a == "--anim").and_then(|i| args.get(i + 1)).map(String::as_str), args.iter().position(|a| a == "--scene").and_then(|i| args.get(i + 1)).map(String::as_str)));
+        if let Some(i) = args.iter().position(|a| a == "--hud") {
+            Self::add_hud(&mut renderer, &args, args.get(i + 1).map_or("sbox-rs", String::as_str));
+        }
         if let Some(i) = args.iter().position(|a| a == "--screenshot") {
             let out = args.get(i + 1).expect("--screenshot <file.png>");
             let secs: f32 = args.iter().position(|a| a == "--time").and_then(|j| args.get(j + 1)).and_then(|v| v.parse().ok()).unwrap_or(1.0);
