@@ -237,6 +237,11 @@ impl ComponentLoader for SceneLoader<'_> {
                 }
                 true
             }
+            "TemporaryEffect" => {
+                let secs = p.get("DestroyAfterSeconds").and_then(Value::as_f64).unwrap_or(1.0) as f32;
+                scene.add_component(go, crate::game::TemporaryEffect::new(secs));
+                true
+            }
             "CubeController" => {
                 let speed = p.get("MoveSpeed").and_then(Value::as_f64).unwrap_or(100.0) as f32;
                 scene.add_component(go, crate::game::CubeController { move_speed: speed });

@@ -183,3 +183,45 @@ impl Component for SoundPoint {
     }
     impl_component_any!();
 }
+
+/// `TemporaryEffect`: destroys its object after `DestroyAfterSeconds` (child effects are not waited for yet).
+pub struct TemporaryEffect {
+    pub destroy_after: f32,
+    age: f32,
+}
+
+impl TemporaryEffect {
+    pub fn new(destroy_after: f32) -> Self {
+        Self { destroy_after, age: 0.0 }
+    }
+}
+
+impl Component for TemporaryEffect {
+    fn on_update(&mut self, scene: &mut Scene, h: Handle) {
+        self.age += scene.delta;
+        if self.age >= self.destroy_after {
+            scene.destroy_object(h.go);
+        }
+    }
+    impl_component_any!();
+}
+
+#[cfg(test)]
+mod effect_tests {
+    use super::*;
+
+    #[test]
+    fn temporary_effect_destroys_its_object() {
+        let mut scene = Scene::new();
+        let go = scene.create_object("boom");
+        scene.add_component(go, TemporaryEffect::new(0.5));
+        for _ in 0..20 {
+            scene.tick(1.0 / 60.0);
+        }
+        assert!(scene.exists(go), "still alive at 0.33s");
+        for _ in 0..30 {
+            scene.tick(1.0 / 60.0);
+        }
+        assert!(!scene.exists(go), "destroyed after 0.5s");
+    }
+}

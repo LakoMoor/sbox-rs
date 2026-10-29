@@ -380,6 +380,11 @@ impl Scene {
 
     // ---------------------------------------------------------------- destroy
 
+    /// True while the object has not been destroyed.
+    pub fn exists(&self, id: GoId) -> bool {
+        self.gos.contains_key(id)
+    }
+
     /// Deferred destruction of an object and its subtree.
     pub fn destroy_object(&mut self, id: GoId) {
         if let Some(g) = self.gos.get_mut(id) {
