@@ -7,6 +7,7 @@ mod meshcomp;
 #[allow(dead_code)]
 mod razor;
 mod razor_ui;
+mod style;
 mod particles;
 mod text;
 mod ui;
@@ -193,7 +194,7 @@ impl App {
         let mut ui = ui::Ui::new(white);
         if let Some(text) = hud {
             let (texture, [w, h]) = Self::text_texture(r, &font, text, 28.0);
-            ui.labels.push(ui::Label { texture, rect: [16.0, 16.0, w, h] });
+            ui.labels.push(ui::Label { texture, rect: [16.0, 16.0, w, h], tint: [1.0; 4] });
         }
         if let Some(path) = razor {
             match std::fs::read_to_string(path).map_err(anyhow::Error::from).and_then(|src| razor::parse(&src)) {
@@ -201,15 +202,15 @@ impl App {
                     let (items, _) = razor_ui::layout(&doc, 40.0, 40.0, 520.0);
                     for item in items {
                         match item {
-                            razor_ui::Item::Panel { rect } => ui.panels.push(ui::Panel { rect, color: [0.05, 0.06, 0.1, 0.85] }),
-                            razor_ui::Item::Text { text, size, rect } => {
+                            razor_ui::Item::Panel { rect, color } => ui.panels.push(ui::Panel { rect, color }),
+                            razor_ui::Item::Text { text, size, color, rect } => {
                                 let (texture, [w, h]) = Self::text_texture(r, &font, &text, size);
-                                ui.labels.push(ui::Label { texture, rect: [rect[0], rect[1], w, h] });
+                                ui.labels.push(ui::Label { texture, rect: [rect[0], rect[1], w, h], tint: color });
                             }
-                            razor_ui::Item::Button { id, text, rect } => ui.buttons.push(ui::Button {
+                            razor_ui::Item::Button { id, text, rect, color } => ui.buttons.push(ui::Button {
                                 id,
                                 rect,
-                                color: [0.18, 0.2, 0.3, 1.0],
+                                color: color.unwrap_or([0.18, 0.2, 0.3, 1.0]),
                                 hover_color: [0.3, 0.4, 0.7, 1.0],
                                 label: Some(Self::text_texture(r, &font, &text, 24.0)),
                             }),
@@ -227,7 +228,7 @@ impl App {
             use layout::Size::Fixed;
             let rects = column.place(panel, &[(Fixed(48.0), None), (Fixed(56.0), None), (Fixed(56.0), None), (Fixed(44.0), None)]);
             let (title, [tw, th]) = Self::text_texture(r, &font, "sbox-rs", 40.0);
-            ui.labels.push(ui::Label { texture: title, rect: [rects[0][0] + (rects[0][2] - tw) * 0.5, rects[0][1] + (rects[0][3] - th) * 0.5, tw, th] });
+            ui.labels.push(ui::Label { texture: title, rect: [rects[0][0] + (rects[0][2] - tw) * 0.5, rects[0][1] + (rects[0][3] - th) * 0.5, tw, th], tint: [1.0; 4] });
             for (i, (id, label)) in [("play", "Play"), ("quit", "Quit")].into_iter().enumerate() {
                 ui.buttons.push(ui::Button {
                     id: id.into(),

@@ -12,6 +12,8 @@ pub struct Panel {
 pub struct Label {
     pub texture: TextureId,
     pub rect: [f32; 4],
+    /// Multiplied with the (white) text texture; rgb in sRGB.
+    pub tint: [f32; 4],
 }
 
 pub struct Button {
@@ -207,7 +209,7 @@ impl Ui {
             }
         }
         for l in &self.labels {
-            out.push(UiRect { texture: l.texture, rect: l.rect, tint: [1.0; 4] });
+            out.push(UiRect { texture: l.texture, rect: l.rect, tint: l.tint });
         }
         out
     }
