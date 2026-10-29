@@ -3,8 +3,9 @@
 //! Networking). Packets are tiny and unreliable except for the connect handshake, which the client retries.
 
 use anyhow::{bail, Result};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{SocketAddr, UdpSocket};
+use std::time::{Duration, Instant};
 
 const MAGIC: [u8; 2] = *b"sb";
 const MAX_PACKET: usize = 1400;
@@ -28,7 +29,14 @@ pub enum Packet {
     Input { seq: u32, movement: [f32; 2], yaw: f32, pitch: f32, buttons: u32 },
     Snapshot { tick: u32, entities: Vec<EntityState> },
     Disconnect,
+    /// Reliable remote call: delivered at least once by retransmission, executed once (the receiver drops duplicates).
+    Rpc { id: u32, name: String, args: Vec<u8> },
+    RpcAck { id: u32 },
 }
+
+/// Largest RPC name and argument sizes; a call must fit one packet.
+pub const MAX_RPC_NAME: usize = 64;
+pub const MAX_RPC_ARGS: usize = 1000;
 
 struct Writer(Vec<u8>);
 impl Writer {
@@ -96,6 +104,18 @@ impl Packet {
                 }
             }
             Packet::Disconnect => w.0.push(5),
+            Packet::Rpc { id, name, args } => {
+                w.0.push(6);
+                w.u32(*id);
+                w.0.push(name.len().min(MAX_RPC_NAME) as u8);
+                w.0.extend(&name.as_bytes()[..name.len().min(MAX_RPC_NAME)]);
+                w.0.extend((args.len().min(MAX_RPC_ARGS) as u16).to_le_bytes());
+                w.0.extend(&args[..args.len().min(MAX_RPC_ARGS)]);
+            }
+            Packet::RpcAck { id } => {
+                w.0.push(7);
+                w.u32(*id);
+            }
         }
         w.0
     }
@@ -126,8 +146,69 @@ impl Packet {
                 Packet::Snapshot { tick, entities }
             }
             5 => Packet::Disconnect,
+            6 => {
+                let id = r.u32()?;
+                let n = r.u8()? as usize;
+                let name = String::from_utf8_lossy(r.take(n)?).into_owned();
+                let len = u16::from_le_bytes(r.take(2)?.try_into()?) as usize;
+                Packet::Rpc { id, name, args: r.take(len)?.to_vec() }
+            }
+            7 => Packet::RpcAck { id: r.u32()? },
             t => bail!("unknown packet type {t}"),
         })
+    }
+}
+
+const RESEND_AFTER: Duration = Duration::from_millis(200);
+
+/// Sending side of the reliable channel: remembers unacknowledged calls and re-sends them.
+#[derive(Default)]
+struct Outbox {
+    next: u32,
+    pending: HashMap<u32, (Vec<u8>, Instant)>,
+}
+
+impl Outbox {
+    fn push(&mut self, name: &str, args: &[u8]) -> Result<Vec<u8>> {
+        if name.len() > MAX_RPC_NAME || args.len() > MAX_RPC_ARGS {
+            bail!("rpc too large ({} byte name, {} bytes of arguments)", name.len(), args.len());
+        }
+        self.next += 1;
+        let data = Packet::Rpc { id: self.next, name: name.to_string(), args: args.to_vec() }.encode();
+        self.pending.insert(self.next, (data.clone(), Instant::now()));
+        Ok(data)
+    }
+
+    fn ack(&mut self, id: u32) {
+        self.pending.remove(&id);
+    }
+
+    /// Packets that were last sent more than [`RESEND_AFTER`] ago.
+    fn due(&mut self) -> Vec<Vec<u8>> {
+        let now = Instant::now();
+        self.pending.values_mut().filter(|(_, t)| now.duration_since(*t) >= RESEND_AFTER).map(|(d, t)| {
+            *t = now;
+            d.clone()
+        }).collect()
+    }
+}
+
+/// Receiving side: tells fresh calls from retransmitted ones.
+#[derive(Default)]
+struct Inbox {
+    seen: HashSet<u32>,
+    max: u32,
+}
+
+impl Inbox {
+    fn fresh(&mut self, id: u32) -> bool {
+        let new = self.seen.insert(id);
+        self.max = self.max.max(id);
+        if self.seen.len() > 2048 {
+            let floor = self.max.saturating_sub(1024);
+            self.seen.retain(|&i| i >= floor);
+        }
+        new
     }
 }
 
@@ -137,11 +218,13 @@ pub enum ServerEvent {
     Connected { client_id: u32, name: String },
     Input { client_id: u32, seq: u32, movement: [f32; 2], yaw: f32, pitch: f32, buttons: u32 },
     Disconnected { client_id: u32 },
+    Rpc { client_id: u32, name: String, args: Vec<u8> },
 }
 
 pub struct Server {
     socket: UdpSocket,
     clients: HashMap<SocketAddr, u32>,
+    reliable: HashMap<u32, (Outbox, Inbox)>,
     next_id: u32,
     pub tick: u32,
 }
@@ -150,7 +233,7 @@ impl Server {
     pub fn bind(addr: &str) -> Result<Self> {
         let socket = UdpSocket::bind(addr)?;
         socket.set_nonblocking(true)?;
-        Ok(Self { socket, clients: HashMap::new(), next_id: 1, tick: 0 })
+        Ok(Self { socket, clients: HashMap::new(), reliable: HashMap::new(), next_id: 1, tick: 0 })
     }
 
     pub fn local_addr(&self) -> Result<SocketAddr> {
@@ -176,6 +259,7 @@ impl Server {
                             let id = self.next_id;
                             self.next_id += 1;
                             self.clients.insert(from, id);
+                            self.reliable.insert(id, Default::default());
                             events.push(ServerEvent::Connected { client_id: id, name });
                             id
                         }
@@ -189,13 +273,45 @@ impl Server {
                 }
                 Packet::Disconnect => {
                     if let Some(client_id) = self.clients.remove(&from) {
+                        self.reliable.remove(&client_id);
                         events.push(ServerEvent::Disconnected { client_id });
+                    }
+                }
+                Packet::Rpc { id, name, args } => {
+                    if let Some(&client_id) = self.clients.get(&from) {
+                        // Always acknowledge, even duplicates: the earlier ack may have been lost.
+                        let _ = self.socket.send_to(&Packet::RpcAck { id }.encode(), from);
+                        if self.reliable.get_mut(&client_id).is_some_and(|(_, inbox)| inbox.fresh(id)) {
+                            events.push(ServerEvent::Rpc { client_id, name, args });
+                        }
+                    }
+                }
+                Packet::RpcAck { id } => {
+                    if let Some((out, _)) = self.clients.get(&from).and_then(|c| self.reliable.get_mut(c)) {
+                        out.ack(id);
                     }
                 }
                 _ => {}
             }
         }
+        // Retransmit calls the clients have not acknowledged yet.
+        let addrs: HashMap<u32, SocketAddr> = self.clients.iter().map(|(a, c)| (*c, *a)).collect();
+        for (id, (out, _)) in &mut self.reliable {
+            for data in out.due() {
+                if let Some(addr) = addrs.get(id) {
+                    let _ = self.socket.send_to(&data, addr);
+                }
+            }
+        }
         events
+    }
+
+    /// Reliable call on one client. Fails for unknown clients and calls that do not fit a packet.
+    pub fn call(&mut self, client_id: u32, name: &str, args: &[u8]) -> Result<()> {
+        let Some(addr) = self.clients.iter().find(|(_, c)| **c == client_id).map(|(a, _)| *a) else { bail!("unknown client {client_id}") };
+        let data = self.reliable.get_mut(&client_id).expect("outbox per client").0.push(name, args)?;
+        let _ = self.socket.send_to(&data, addr);
+        Ok(())
     }
 
     /// Send the world state to every client, split into packets that fit the MTU. Advances the tick.
@@ -219,6 +335,9 @@ pub struct Client {
     /// Latest known state of every entity, by id.
     pub entities: HashMap<u32, EntityState>,
     seq: u32,
+    out: Outbox,
+    inbox: Inbox,
+    rpcs: Vec<(String, Vec<u8>)>,
 }
 
 impl Client {
@@ -227,7 +346,7 @@ impl Client {
         socket.connect(server)?;
         socket.set_nonblocking(true)?;
         socket.send(&Packet::Connect { name: name.to_string() }.encode())?;
-        Ok(Self { socket, client_id: None, last_tick: 0, entities: HashMap::new(), seq: 0 })
+        Ok(Self { socket, client_id: None, last_tick: 0, entities: HashMap::new(), seq: 0, out: Outbox::default(), inbox: Inbox::default(), rpcs: Vec::new() })
     }
 
     /// Re-send the handshake (call periodically until [`Client::client_id`] is set).
@@ -250,6 +369,13 @@ impl Client {
         while let Ok(n) = self.socket.recv(&mut buf) {
             match Packet::decode(&buf[..n]) {
                 Ok(Packet::Accepted { client_id }) => self.client_id = Some(client_id),
+                Ok(Packet::Rpc { id, name, args }) => {
+                    let _ = self.socket.send(&Packet::RpcAck { id }.encode());
+                    if self.inbox.fresh(id) {
+                        self.rpcs.push((name, args));
+                    }
+                }
+                Ok(Packet::RpcAck { id }) => self.out.ack(id),
                 Ok(Packet::Snapshot { tick, entities }) if tick >= self.last_tick => {
                     self.last_tick = tick;
                     for e in entities {
@@ -259,6 +385,21 @@ impl Client {
                 _ => {}
             }
         }
+        for data in self.out.due() {
+            let _ = self.socket.send(&data);
+        }
+    }
+
+    /// Reliable call on the server. Fails when the call does not fit a packet.
+    pub fn call(&mut self, name: &str, args: &[u8]) -> Result<()> {
+        let data = self.out.push(name, args)?;
+        let _ = self.socket.send(&data);
+        Ok(())
+    }
+
+    /// Calls the server made on this client since the last time.
+    pub fn take_rpcs(&mut self) -> Vec<(String, Vec<u8>)> {
+        std::mem::take(&mut self.rpcs)
     }
 }
 
@@ -290,6 +431,81 @@ mod tests {
         for p in packets {
             assert_eq!(Packet::decode(&p.encode()).unwrap(), p);
         }
+    }
+
+    #[test]
+    fn rpc_packets_round_trip() {
+        for p in [Packet::Rpc { id: 3, name: "chat".into(), args: vec![1, 2, 3] }, Packet::RpcAck { id: 3 }, Packet::Rpc { id: 1, name: String::new(), args: vec![] }] {
+            assert_eq!(Packet::decode(&p.encode()).unwrap(), p);
+        }
+        assert!(Packet::decode(b"sb\x06\x01\x00\x00\x00\x02ab\xff\x03").is_err(), "arguments cut short");
+    }
+
+    #[test]
+    fn rpcs_are_delivered_once_both_ways_and_acknowledged() {
+        let mut server = Server::bind("127.0.0.1:0").unwrap();
+        let mut client = Client::connect(&server.local_addr().unwrap().to_string(), "c").unwrap();
+        assert!(wait(|| {
+            server.poll();
+            client.poll();
+            client.client_id.is_some()
+        }));
+        client.call("chat", b"hello").unwrap();
+        server.call(1, "kick", b"").unwrap();
+        let mut got_server = Vec::new();
+        let mut got_client = Vec::new();
+        assert!(wait(|| {
+            got_server.extend(server.poll());
+            client.poll();
+            got_client.extend(client.take_rpcs());
+            !got_server.is_empty() && !got_client.is_empty()
+        }));
+        assert_eq!(got_server, vec![ServerEvent::Rpc { client_id: 1, name: "chat".into(), args: b"hello".to_vec() }]);
+        assert_eq!(got_client, vec![("kick".to_string(), vec![])]);
+        // Acknowledged: nothing left to resend.
+        assert!(wait(|| {
+            server.poll();
+            client.poll();
+            client.out.pending.is_empty() && server.reliable[&1].0.pending.is_empty()
+        }));
+    }
+
+    #[test]
+    fn lost_calls_are_resent_and_duplicates_run_once() {
+        let mut server = Server::bind("127.0.0.1:0").unwrap();
+        let mut client = Client::connect(&server.local_addr().unwrap().to_string(), "c").unwrap();
+        assert!(wait(|| {
+            server.poll();
+            client.poll();
+            client.client_id.is_some()
+        }));
+        // Simulate a lost first transmission: register the call without sending it.
+        client.out.push("save", b"x").unwrap();
+        let mut events = Vec::new();
+        assert!(wait(|| {
+            events.extend(server.poll());
+            client.poll();
+            !events.is_empty()
+        }), "the retransmission arrives");
+        // Replaying the same call (a duplicate) must not run it again.
+        let dup = Packet::Rpc { id: 1, name: "save".into(), args: b"x".to_vec() }.encode();
+        client.socket.send(&dup).unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        events.extend(server.poll());
+        assert_eq!(events.len(), 1, "{events:?}");
+    }
+
+    #[test]
+    fn oversized_rpcs_are_refused_and_strangers_cannot_call() {
+        let mut server = Server::bind("127.0.0.1:0").unwrap();
+        let mut client = Client::connect(&server.local_addr().unwrap().to_string(), "c").unwrap();
+        assert!(client.call("x", &[0; MAX_RPC_ARGS + 1]).is_err());
+        assert!(client.call(&"n".repeat(MAX_RPC_NAME + 1), b"").is_err());
+        assert!(server.call(99, "x", b"").is_err(), "unknown client");
+        let stranger = UdpSocket::bind("127.0.0.1:0").unwrap();
+        stranger.send_to(&Packet::Rpc { id: 1, name: "x".into(), args: vec![] }.encode(), server.local_addr().unwrap()).unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(server.poll().iter().all(|e| !matches!(e, ServerEvent::Rpc { .. })));
     }
 
     #[test]
@@ -401,6 +617,8 @@ pub mod replication {
                 ServerEvent::Input { client_id, movement, yaw, .. } => {
                     self.input.insert(*client_id, (*movement, *yaw));
                 }
+                // Calls are for the game to interpret.
+                ServerEvent::Rpc { .. } => {}
                 ServerEvent::Disconnected { client_id } => {
                     self.input.remove(client_id);
                     if let Some(go) = self.objects.remove(client_id) {
