@@ -144,3 +144,27 @@ impl Default for Vignette {
 impl Component for Vignette {
     impl_component_any!();
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum TonemapMode {
+    #[default]
+    Aces,
+    AgX,
+    Reinhard,
+}
+
+/// Selects the tone mapping curve and a fixed exposure (`exposure_compensation` in EV stops; auto exposure is not simulated).
+pub struct Tonemapping {
+    pub mode: TonemapMode,
+    pub exposure_compensation: f32,
+}
+
+impl Default for Tonemapping {
+    fn default() -> Self {
+        Self { mode: TonemapMode::Aces, exposure_compensation: 0.0 }
+    }
+}
+
+impl Component for Tonemapping {
+    impl_component_any!();
+}

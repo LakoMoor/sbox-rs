@@ -46,7 +46,7 @@ Checked on the `game/` directory produced by the official `Setup` step:
 - Networking
 - `Decal` is drawn as a flat translucent quad with its `.decal_c` colour texture (no projection onto surfaces, no sequences)
 - `ModelCollider` is approximated by the model bounding box; `MeshComponent` (compressed half-edge `Topology`) is not decoded
-- Post-processing: the scene renders to an Rgba16F target and a post pass applies ACES, `Bloom` (32-tap single-pass blur of the bright-pass) and `Vignette`; `Tonemapping` (auto exposure), `DepthOfField`, `AmbientOcclusion`, `ScreenSpaceReflections`, `Sharpen` are ignored
+- Post-processing: the scene renders to an Rgba16F target and a post pass applies tone mapping, `Bloom` (32-tap single-pass blur of the bright-pass) and `Vignette`; `Tonemapping` (ACES / AgX approximation / Reinhard and a fixed EV exposure; no auto exposure), `DepthOfField`, `AmbientOcclusion`, `ScreenSpaceReflections`, `Sharpen` are ignored
 - `SpotLight` is a real cone light (smoothstep between inner and outer angle; no shadows; shares the 8-slot point light array)
 - Maps: world nodes (`vwrld_c` / `vwnod_c`) are loaded with `--map <maps/x/world.vwrld_c> --game <game dir>`; map entities (`vents_c`), lightmaps and visibility are ignored
 - Prefab instances/variables, most scene component types (only models, lights, camera, rigidbody and colliders are mapped)

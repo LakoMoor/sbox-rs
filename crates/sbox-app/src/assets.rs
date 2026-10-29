@@ -287,6 +287,16 @@ impl ComponentLoader for SceneLoader<'_> {
                 scene.add_component(go, sbox_scene::Bloom { strength: f("Strength", 1.0), threshold: f("Threshold", 1.0), tint: [c[0], c[1], c[2]] });
                 true
             }
+            "Tonemapping" => {
+                let mode = match p.get("Mode").and_then(Value::as_str) {
+                    Some("AgX") => sbox_scene::TonemapMode::AgX,
+                    Some("Reinhard") => sbox_scene::TonemapMode::Reinhard,
+                    _ => sbox_scene::TonemapMode::Aces,
+                };
+                let ev = p.get("ExposureCompensation").and_then(Value::as_f64).unwrap_or(0.0) as f32;
+                scene.add_component(go, sbox_scene::Tonemapping { mode, exposure_compensation: ev });
+                true
+            }
             "Vignette" => {
                 let f = |k: &str, d: f64| p.get(k).and_then(Value::as_f64).unwrap_or(d) as f32;
                 scene.add_component(go, sbox_scene::Vignette { intensity: f("Intensity", 1.0), smoothness: f("Smoothness", 1.0), roundness: f("Roundness", 1.0) });
