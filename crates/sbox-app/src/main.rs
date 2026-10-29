@@ -204,7 +204,13 @@ impl App {
         if let Some(path) = razor {
             match std::fs::read_to_string(path).map_err(anyhow::Error::from).and_then(|src| razor::parse(&src)) {
                 Ok(doc) => {
-                    let (items, content) = razor_ui::layout(&doc, 40.0, 40.0, 520.0);
+                    // `--bind Name=Value` (repeatable) supplies the data the page's `@Name` expressions and `@if` conditions read.
+                    let values: std::collections::HashMap<String, String> = args
+                        .windows(2)
+                        .filter(|w| w[0] == "--bind")
+                        .filter_map(|w| w[1].split_once('=').map(|(k, v)| (k.to_string(), v.to_string())))
+                        .collect();
+                    let (items, content) = razor_ui::layout_bound(&doc, 40.0, 40.0, 520.0, &values);
                     ui.content_height = 40.0 + content + 40.0;
                     for item in items {
                         match item {
@@ -741,7 +747,7 @@ impl ApplicationHandler for App {
                 self.refresh_ui();
                 if let Some(id) = self.ui.as_ref().and_then(|ui| ui.click(self.cursor.0, self.cursor.1)) {
                     log::info!("ui: clicked {id}");
-                    if id == "quit" {
+                    if id.eq_ignore_ascii_case("quit") {
                         el.exit();
                     }
                     return;

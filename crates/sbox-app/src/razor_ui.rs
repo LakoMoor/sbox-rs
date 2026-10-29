@@ -4,7 +4,8 @@
 //! Containers stack their children in a column (or a row); headings and paragraphs become text, `<button>` a button.
 
 use crate::layout::{Align, Axis, Size, Stack};
-use crate::razor::{AttrValue, Document, Node};
+use crate::razor::{Attr, AttrValue, Document, Node};
+use std::collections::HashMap;
 use crate::style::{Style, Stylesheet};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -40,6 +41,10 @@ fn is_text_leaf(n: &Node) -> bool {
 }
 
 fn button_id(n: &Node) -> String {
+    // `onclick=@Handler` names the handler the app dispatches on; otherwise the id attribute or the label.
+    if let Some(AttrValue::Expr(handler)) = n.attr("onclick").or_else(|| n.attr("@onclick")) {
+        return handler.trim().to_string();
+    }
     match n.attr("id") {
         Some(AttrValue::Text(t)) => t.clone(),
         _ => n.text().to_lowercase().replace(' ', "_"),
@@ -169,6 +174,84 @@ impl Ctx<'_> {
     }
 }
 
+/// Whether a condition such as `Show`, `!Show` or `( Show )` holds: a bound value that is neither empty, `false` nor `0`.
+fn truthy(cond: &str, values: &HashMap<String, String>) -> bool {
+    let c = cond.trim().trim_start_matches('(').trim_end_matches(')').trim();
+    let (negated, name) = match c.strip_prefix('!') {
+        Some(rest) => (true, rest.trim()),
+        None => (false, c),
+    };
+    let on = values.get(name).is_some_and(|v| !v.is_empty() && v != "false" && v != "0");
+    on != negated
+}
+
+/// Resolve data bindings: `@Name` becomes the bound text (nothing when unbound), `value=@Name` attributes become text
+/// (event attributes `onclick=@Handler` keep their expression), and `@if (Flag) {..} else {..}` keeps the branch the
+/// values select. `@foreach` and other blocks are dropped.
+pub fn bind(nodes: &[Node], values: &HashMap<String, String>) -> Vec<Node> {
+    let mut out = Vec::new();
+    // Whether the `if` / `else if` chain in progress has already taken a branch.
+    let mut taken = false;
+    for n in nodes {
+        match n {
+            Node::Expr(e) => {
+                taken = false;
+                if let Some(v) = values.get(e.trim()) {
+                    out.push(Node::Text(v.clone()));
+                }
+            }
+            Node::Block { head, children } => {
+                let h = head.trim();
+                let branch = if let Some(cond) = h.strip_prefix("if") {
+                    taken = truthy(cond, values);
+                    taken
+                } else if let Some(rest) = h.strip_prefix("else") {
+                    let rest = rest.trim();
+                    if taken {
+                        false
+                    } else if let Some(cond) = rest.strip_prefix("if") {
+                        taken = truthy(cond, values);
+                        taken
+                    } else {
+                        taken = true;
+                        true
+                    }
+                } else {
+                    taken = false;
+                    false
+                };
+                if branch {
+                    out.extend(bind(children, values));
+                }
+            }
+            Node::Element { tag, attrs, children } => {
+                taken = false;
+                let attrs = attrs
+                    .iter()
+                    .map(|a| match &a.value {
+                        AttrValue::Expr(e) if !a.name.trim_start_matches('@').starts_with("on") => {
+                            Attr { name: a.name.clone(), value: values.get(e.trim()).map_or(AttrValue::Flag, |v| AttrValue::Text(v.clone())) }
+                        }
+                        _ => a.clone(),
+                    })
+                    .collect();
+                out.push(Node::Element { tag: tag.clone(), attrs, children: bind(children, values) });
+            }
+            Node::Text(_) => {
+                taken = false;
+                out.push(n.clone());
+            }
+        }
+    }
+    out
+}
+
+/// Like [`layout`], with data bindings resolved from `values` first.
+pub fn layout_bound(doc: &Document, x: f32, y: f32, width: f32, values: &HashMap<String, String>) -> (Vec<Item>, f32) {
+    let bound = Document { nodes: bind(&doc.nodes, values), ..doc.clone() };
+    layout(&bound, x, y, width)
+}
+
 /// Concatenated text of every `<style>` element in the document.
 fn collect_css(nodes: &[Node], out: &mut String) {
     for n in nodes {
@@ -229,6 +312,40 @@ mod tests {
         let doc = parse("<root><style>.a { color: red }</style>@if (x) {<p>hidden</p>}<p>@Name</p><p>shown</p></root>").unwrap();
         let (items, _) = layout(&doc, 0.0, 0.0, 300.0);
         assert_eq!(texts(&items), vec!["shown"]);
+    }
+
+    fn vals(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    #[test]
+    fn expressions_take_their_bound_text() {
+        let doc = parse("<root><h1>@Title</h1><p>Score: @Score</p><p>@Missing</p></root>").unwrap();
+        let (items, _) = layout_bound(&doc, 0.0, 0.0, 300.0, &vals(&[("Title", "Hello"), ("Score", "42")]));
+        assert_eq!(texts(&items), vec!["Hello", "Score: 42"], "unbound expressions leave nothing");
+    }
+
+    #[test]
+    fn if_else_chains_pick_one_branch() {
+        let doc = parse("<root>@if (Admin) {<p>admin</p>} else if (!Banned) {<p>user</p>} else {<p>banned</p>}</root>").unwrap();
+        let t = |v: &[(&str, &str)]| texts(&layout_bound(&doc, 0.0, 0.0, 300.0, &vals(v)).0).into_iter().map(String::from).collect::<Vec<_>>();
+        assert_eq!(t(&[("Admin", "true")]), vec!["admin"]);
+        assert_eq!(t(&[]), vec!["user"], "not banned");
+        assert_eq!(t(&[("Banned", "true")]), vec!["banned"]);
+        assert_eq!(t(&[("Admin", "false"), ("Banned", "0")]), vec!["user"]);
+    }
+
+    #[test]
+    fn buttons_report_their_click_handler_and_bound_attributes_become_text() {
+        let doc = parse("<root><button onclick=@StartGame class=@Style>Go</button><button @onclick=@(() => Quit())>Out</button><button id=\"plain\">Plain</button></root>").unwrap();
+        let (items, _) = layout_bound(&doc, 0.0, 0.0, 300.0, &vals(&[("Style", "big")]));
+        let ids: Vec<_> = items.iter().filter_map(|i| if let Item::Button { id, .. } = i { Some(id.as_str()) } else { None }).collect();
+        assert_eq!(ids, vec!["StartGame", "() => Quit()", "plain"]);
+        let bound = bind(&doc.nodes, &vals(&[("Style", "big")]));
+        let Node::Element { children, .. } = &bound[0] else { panic!() };
+        assert_eq!(children[0].classes(), vec!["big"]);
+        assert_eq!(children[0].attr("class"), Some(&AttrValue::Text("big".into())));
+        assert_eq!(children[0].attr("onclick"), Some(&AttrValue::Expr("StartGame".into())), "events keep their expression");
     }
 
     #[test]
