@@ -237,7 +237,8 @@ impl<'a> P<'a> {
             } else if c == '<'
                 && self.rest()[1..].chars().next().is_some_and(|c| c.is_alphabetic())
                 // `Foo<Bar>(` in the C# of a code block is a generic argument list, not an element.
-                && !self.s[..self.i].chars().next_back().is_some_and(|p| p.is_alphanumeric() || p == '_')
+                && !(self.s[..self.i].chars().next_back().is_some_and(|p| p.is_alphanumeric() || p == '_')
+                    && self.rest().find('>').is_some_and(|e| matches!(self.rest()[e + 1..].chars().next(), Some('(' | '.' | ',' | ')' | ';' | '[')) && !self.rest()[..e].contains(char::is_whitespace)))
             {
                 flush!();
                 out.push(self.element()?);
