@@ -220,7 +220,7 @@ fn ssr(px: vec2<i32>, dims: vec2<f32>) -> vec4<f32> {
     }
     // Nothing on screen was hit: fall back to the sky cubemap (when the scene has one) in the mirror direction, weighted
     // like a hit but without the edge and distance fades.
-    if (post.cube_tint.w > 0.0) {
+    if (post.cube_tint.w > 0.0 && post.ssr.z < 0.5) {
         let metal = (g.a - 0.25) / 0.75;
         let f0 = mix(0.04, 0.9, clamp(metal, 0.0, 1.0));
         let fres = f0 + (1.0 - f0) * pow(1.0 - clamp(dot(-v, n), 0.0, 1.0), 5.0);

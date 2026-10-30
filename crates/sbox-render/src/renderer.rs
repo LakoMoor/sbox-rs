@@ -103,7 +103,7 @@ struct PostUniform {
     vol_max: [[f32; 4]; 4],
     cube_fog: [f32; 4],  // start, end (0 = off), falloff exponent, blur
     cube_tint: [f32; 4], // rgb tint, sky exposure
-    ssr: [f32; 4],       // x = max distance (0 = off), y = intensity
+    ssr: [f32; 4],       // x = max distance (0 = off), y = intensity, z = 1 disables the sky fallback (SBOX_NO_SSR_SKY, for comparisons)
 }
 
 /// A textured screen-space rectangle drawn over the finished frame (`rect` = x, y, width, height in pixels, origin top-left).
@@ -1276,7 +1276,7 @@ impl Renderer {
             }
             let cfog = self.sky.as_ref().and_then(|sky| scene.iter_components::<CubemapFog>().next().map(|(_, f)| (sky.exposure, sky.tint, f)));
             let ao = scene.iter_components::<AmbientOcclusion>().next().map(|(_, a)| a);
-            let ssr = scene.iter_components::<ScreenSpaceReflections>().next().map_or([0.0; 4], |(_, r)| [r.max_distance.max(1.0), r.intensity, 0.0, 0.0]);
+            let ssr = scene.iter_components::<ScreenSpaceReflections>().next().map_or([0.0; 4], |(_, r)| [r.max_distance.max(1.0), r.intensity, if std::env::var_os("SBOX_NO_SSR_SKY").is_some() { 1.0 } else { 0.0 }, 0.0]);
             let dof = scene.iter_components::<DepthOfField>().next().map(|(_, d)| d);
             let sharpen = scene.iter_components::<Sharpen>().next().map_or(0.0, |(_, s)| s.scale);
             let post = PostUniform {
