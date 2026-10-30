@@ -83,6 +83,8 @@ pub fn spawn_ragdoll(scene: &mut Scene, root: &Transform, parts: &[sbox_resource
             swing_limit: j.swing,
             twist_limit: j.twist,
             collide: j.collide,
+            hinge: false,
+            drives: Vec::new(),
         };
         scene.add_component(owner, joint);
     }

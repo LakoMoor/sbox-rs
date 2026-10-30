@@ -125,9 +125,47 @@ pub struct Joint {
     pub twist_limit: Option<[f32; 2]>,
     /// Whether the two bodies collide with each other (ragdoll parts do not).
     pub collide: bool,
+    /// A hinge (`phys_hinge`) turns only about the frames' X axis, limited by `twist_limit`; otherwise a ball joint.
+    pub hinge: bool,
+    /// Motors and springs on the joint's angular axes.
+    pub drives: Vec<Drive>,
 }
+
+impl Joint {
+    /// A free ball joint between this object's body and `other`'s.
+    pub fn new(other: GoId, frame1: Transform, frame2: Transform) -> Self {
+        Self { other, frame1, frame2, swing_limit: None, twist_limit: None, collide: false, hinge: false, drives: Vec::new() }
+    }
+}
+
 impl Component for Joint {
     impl_component_any!();
+}
+
+/// Which angular axis of a joint a [`Drive`] acts on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DriveAxis {
+    /// About the frames' X axis (the only axis of a hinge).
+    Twist,
+    SwingY,
+    SwingZ,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum DriveMode {
+    /// Spin at `target` radians per second; `factor` is the motor's damping coefficient (torque per rad/s of speed error),
+    /// so it has to be large next to the body's inertia for the target to be reached quickly.
+    Velocity { target: f32, factor: f32 },
+    /// A spring toward the angle `target` (radians): `stiffness` pulls, `damping` slows the approach.
+    Spring { target: f32, stiffness: f32, damping: f32 },
+}
+
+/// A motor or spring on one angular axis of a [`Joint`]; `max_force` caps the torque it may apply.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Drive {
+    pub axis: DriveAxis,
+    pub mode: DriveMode,
+    pub max_force: f32,
 }
 
 /// `BoxCollider` / `SphereCollider` / `PlaneCollider`.
@@ -321,7 +359,8 @@ impl Physics {
             let body = |g: GoId| Self::rigidbody_owner(scene, g).and_then(|o| self.body_of.get(&o).copied());
             let (Some(b1), Some(b2)) = (body(go), body(j.other)) else { continue };
             self.jointed.insert(go);
-            let mut builder = GenericJointBuilder::new(JointAxesMask::LOCKED_SPHERICAL_AXES)
+            let mask = if j.hinge { JointAxesMask::LOCKED_REVOLUTE_AXES } else { JointAxesMask::LOCKED_SPHERICAL_AXES };
+            let mut builder = GenericJointBuilder::new(mask)
                 .local_frame1(iso(&Transform::new(j.frame1.position, j.frame1.rotation, Vec3::ONE)))
                 .local_frame2(iso(&Transform::new(j.frame2.position, j.frame2.rotation, Vec3::ONE)))
                 .contacts_enabled(j.collide);
@@ -331,6 +370,18 @@ impl Physics {
             }
             if let Some(s) = j.swing_limit {
                 builder = builder.limits(JointAxis::AngY, [-s, s]).limits(JointAxis::AngZ, [-s, s]);
+            }
+            for d in &j.drives {
+                let axis = match d.axis {
+                    DriveAxis::Twist => JointAxis::AngX,
+                    DriveAxis::SwingY => JointAxis::AngY,
+                    DriveAxis::SwingZ => JointAxis::AngZ,
+                };
+                builder = match d.mode {
+                    DriveMode::Velocity { target, factor } => builder.motor_velocity(axis, target, factor),
+                    DriveMode::Spring { target, stiffness, damping } => builder.motor_position(axis, target, stiffness, damping),
+                }
+                .motor_max_force(axis, d.max_force);
             }
             self.impulse_joints.insert(b1, b2, builder.build(), true);
         }
@@ -516,14 +567,7 @@ mod tests {
         scene.set_local_transform(ball, Transform::from_position(Vec3::new(100.0, 0.0, 300.0)));
         scene.add_component(ball, Rigidbody::default());
         scene.add_component(ball, Collider { shape: Shape::Sphere { center: Vec3::ZERO, radius: 10.0 }, is_trigger: false });
-        scene.add_component(anchor, Joint {
-            other: ball,
-            frame1: Transform::from_position(Vec3::ZERO),
-            frame2: Transform::from_position(Vec3::new(-100.0, 0.0, 0.0)),
-            swing_limit: None,
-            twist_limit: None,
-            collide: false,
-        });
+        scene.add_component(anchor, Joint::new(ball, Transform::from_position(Vec3::ZERO), Transform::from_position(Vec3::new(-100.0, 0.0, 0.0))));
         for _ in 0..300 {
             scene.tick(1.0 / 50.0);
         }
@@ -532,6 +576,54 @@ mod tests {
         let dist = (p - Vec3::new(0.0, 0.0, 300.0)).length();
         assert!((dist - 100.0).abs() < 3.0, "distance to the pin should stay 100, got {dist}");
         assert!(p.z < 300.0, "gravity pulls the ball down, z={}", p.z);
+    }
+
+    /// A fixed anchor and a free body joined by a hinge about X, in zero gravity; returns the scene and the body.
+    fn hinge_rig(drive: Drive, hinge: bool) -> (Scene, GoId) {
+        let mut scene = Scene::new();
+        Physics::install(&mut scene);
+        scene.resource_mut::<Physics>().unwrap().gravity = Vec3::ZERO;
+        let anchor = scene.create_object("anchor");
+        scene.add_component(anchor, Rigidbody { motion_enabled: false, ..Default::default() });
+        let wheel = scene.create_object("wheel");
+        scene.add_component(wheel, Rigidbody::default());
+        scene.add_component(wheel, Collider { shape: Shape::Sphere { center: Vec3::new(0.0, 20.0, 0.0), radius: 10.0 }, is_trigger: false });
+        let mut j = Joint::new(wheel, Transform::from_position(Vec3::ZERO), Transform::from_position(Vec3::ZERO));
+        j.hinge = hinge;
+        j.drives.push(drive);
+        scene.add_component(anchor, j);
+        (scene, wheel)
+    }
+
+    /// Angle of the body about X, from where its +Y axis points.
+    fn x_angle(scene: &Scene, go: GoId) -> f32 {
+        let y = scene.world_transform(go).rotation * Vec3::Y;
+        y.z.atan2(y.y)
+    }
+
+    #[test]
+    fn a_velocity_motor_spins_a_hinge() {
+        let (mut scene, wheel) = hinge_rig(Drive { axis: DriveAxis::Twist, mode: DriveMode::Velocity { target: 1.0, factor: 1.0e5 }, max_force: 1.0e9 }, true);
+        for _ in 0..100 {
+            scene.tick(1.0 / 50.0);
+        }
+        let a = x_angle(&scene, wheel);
+        assert!((a - 2.0).abs() < 0.3, "1 rad/s for 2 s is about 2 rad, got {a}");
+        // The hinge keeps the body's centre on the axis and its swing locked.
+        let p = scene.world_transform(wheel).position;
+        assert!(p.length() < 1.0, "centre stays at the pin, got {p:?}");
+        let x = scene.world_transform(wheel).rotation * Vec3::X;
+        assert!((x - Vec3::X).length() < 0.05, "the axis does not tilt, got {x:?}");
+    }
+
+    #[test]
+    fn a_spring_drive_pulls_the_hinge_to_its_target_angle() {
+        let (mut scene, wheel) = hinge_rig(Drive { axis: DriveAxis::Twist, mode: DriveMode::Spring { target: 0.8, stiffness: 2.0e5, damping: 2.0e4 }, max_force: 1.0e9 }, true);
+        for _ in 0..300 {
+            scene.tick(1.0 / 50.0);
+        }
+        let a = x_angle(&scene, wheel);
+        assert!((a - 0.8).abs() < 0.1, "settles at the target angle, got {a}");
     }
 
     #[test]
