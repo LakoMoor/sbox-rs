@@ -93,6 +93,8 @@ pub struct PhysPart {
     /// Rest rotation as a quaternion `[x, y, z, w]`.
     pub rotation: [f32; 4],
     pub mass: f32,
+    /// Name of the skeleton bone the part follows (`m_boneNames`).
+    pub bone: Option<String>,
 }
 
 /// A twist / swing joint between two parts (`m_joints[]`, `m_nType` 4). Frames are `(position, rotation [x, y, z, w])`
@@ -141,7 +143,8 @@ pub fn parts(kv: &Value) -> Option<Vec<PhysPart>> {
             Some(m) => ([m[3], m[7], m[11]], matrix_rotation(m)),
             None => ([0.0; 3], [0.0, 0.0, 0.0, 1.0]),
         };
-        out.push(PhysPart { shapes: part_shapes(part, &None)?, position, rotation, mass: part.get("m_flMass").and_then(Value::as_f64).unwrap_or(0.0) as f32 });
+        let bone = kv.get("m_boneNames").and_then(Value::as_array).and_then(|n| n.get(i)).and_then(Value::as_str).map(String::from);
+        out.push(PhysPart { shapes: part_shapes(part, &None)?, position, rotation, mass: part.get("m_flMass").and_then(Value::as_f64).unwrap_or(0.0) as f32, bone });
     }
     (!out.is_empty()).then_some(out)
 }
@@ -278,6 +281,7 @@ mod tests {
         assert_eq!(p[0].shapes, vec![PhysShape::Sphere { center: [5.0, 0.0, 0.0], radius: 1.0 }], "shapes stay in the part's space");
         assert_eq!(p[0].position, [1.0, 2.0, 3.0]);
         assert_eq!(p[0].mass, 3.0);
+        assert_eq!(p[0].bone, None);
         let h = std::f32::consts::FRAC_1_SQRT_2;
         assert!((p[0].rotation[2] - h).abs() < 1e-5 && (p[0].rotation[3] - h).abs() < 1e-5, "90 degrees about Z, got {:?}", p[0].rotation);
         let j = joints(&kv);

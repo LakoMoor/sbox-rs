@@ -794,7 +794,7 @@ mod tests {
         scene.add_component(ground, Collider { shape: Shape::Plane, is_trigger: false });
         // Three capsule parts stacked 40 units apart, each joined to the next at the shared point; both joints come from the
         // middle part, so one of them hangs off a helper object.
-        let part = |z: f32| PhysPart { shapes: vec![PhysShape::Capsule { a: [0.0, 0.0, -10.0], b: [0.0, 0.0, 10.0], radius: 5.0 }], position: [0.0, 0.0, z], rotation: [0.0, 0.0, 0.0, 1.0], mass: 5.0 };
+        let part = |z: f32| PhysPart { shapes: vec![PhysShape::Capsule { a: [0.0, 0.0, -10.0], b: [0.0, 0.0, 10.0], radius: 5.0 }], position: [0.0, 0.0, z], rotation: [0.0, 0.0, 0.0, 1.0], mass: 5.0, bone: None };
         let frame = |z: f32| ([0.0, 0.0, z], [0.0, 0.0, 0.0, 1.0]);
         let joint = |a: usize, b: usize| PhysJoint { body1: a, body2: b, frame1: frame(20.0), frame2: frame(-20.0), swing: Some(1.0), twist: Some([-0.5, 0.5]), collide: false };
         let bodies = spawn_ragdoll(&mut scene, &Transform::from_position(Vec3::new(0.0, 0.0, 300.0)), &[part(0.0), part(40.0), part(80.0)], &[joint(1, 2), joint(1, 0)]);

@@ -63,6 +63,96 @@ impl Component for Animator {
     impl_component_any!();
 }
 
+/// Skins a model from ragdoll bodies: every bone with a physics part takes that body's motion, the others follow their
+/// nearest ancestor that has one. Runs after the animators (it is added later), so it overrides their pose.
+struct RagdollSkin {
+    skeleton: sbox_resource::model::Skeleton,
+    bodies: Vec<sbox_scene::GoId>,
+    /// Skeleton bone of each body, if the part names one the skeleton has.
+    bone_of: Vec<Option<usize>>,
+    /// Inverse of each part's rest pose in model space.
+    rest_inv: Vec<sbox_math::Mat4>,
+    root: sbox_scene::GoId,
+    parts: Vec<sbox_scene::GoId>,
+}
+
+impl Component for RagdollSkin {
+    fn on_update(&mut self, scene: &mut Scene, _h: Handle) {
+        use sbox_math::Mat4;
+        let to_mat = |t: &Transform| Mat4::from_rotation_translation(t.rotation, t.position);
+        let root_inv = to_mat(&scene.world_transform(self.root)).inverse();
+        let mut by_bone: Vec<Option<Mat4>> = vec![None; self.skeleton.len()];
+        for (i, &body) in self.bodies.iter().enumerate() {
+            if let Some(b) = self.bone_of[i] {
+                // Model space again: undo the model object's own transform, then move from the rest pose to the body.
+                by_bone[b] = Some(root_inv * to_mat(&scene.world_transform(body)) * self.rest_inv[i]);
+            }
+        }
+        let mut skin: Vec<Mat4> = Vec::with_capacity(self.skeleton.len());
+        for i in 0..self.skeleton.len() {
+            let m = by_bone[i].unwrap_or_else(|| match self.skeleton.parents.get(i) {
+                Some(&p) if p >= 0 && (p as usize) < i => skin[p as usize],
+                _ => Mat4::IDENTITY,
+            });
+            skin.push(m);
+        }
+        let mats: Vec<[[f32; 4]; 4]> = skin.iter().map(Mat4::to_cols_array_2d).collect();
+        for &go in &self.parts {
+            if let Some(m) = scene.component_mut::<ModelRenderer>(go) {
+                m.bones = mats.clone();
+            }
+        }
+    }
+    impl_component_any!();
+}
+
+/// `--ragdoll` on a model: pressing R (the `Reload` action) turns the model into a ragdoll that drops to the floor.
+struct RagdollSwitch {
+    skeleton: sbox_resource::model::Skeleton,
+    parts_data: Vec<sbox_resource::phys::PhysPart>,
+    joints: Vec<sbox_resource::phys::PhysJoint>,
+    parts: Vec<sbox_scene::GoId>,
+    /// World height of the floor the ragdoll lands on (the model's lowest point).
+    floor_z: f32,
+    /// `--ragdoll-after <seconds>` drops the model without a key press (for screenshots).
+    auto_after: Option<f32>,
+    done: bool,
+}
+
+impl Component for RagdollSwitch {
+    fn on_update(&mut self, scene: &mut Scene, h: Handle) {
+        if self.done {
+            return;
+        }
+        if let Some(t) = &mut self.auto_after {
+            *t -= scene.delta;
+        }
+        if !scene.resource::<Input>().is_some_and(|i| i.pressed("Reload")) && !self.auto_after.is_some_and(|t| t <= 0.0) {
+            return;
+        }
+        self.done = true;
+        let root = h.go;
+        let world = scene.world_transform(root);
+        if scene.resource::<sbox_physics::Physics>().is_none() {
+            sbox_physics::Physics::install(scene);
+        }
+        let floor = scene.create_object("ragdoll_floor");
+        scene.set_local_transform(floor, Transform::from_position(Vec3::new(0.0, 0.0, self.floor_z)));
+        scene.add_component(floor, sbox_physics::Collider { shape: sbox_physics::Shape::Plane, is_trigger: false });
+        let bodies = assets::spawn_ragdoll(scene, &world, &self.parts_data, &self.joints);
+        let by_name: std::collections::HashMap<&str, usize> = self.skeleton.names.iter().enumerate().map(|(i, n)| (n.as_str(), i)).collect();
+        let bone_of = self.parts_data.iter().map(|p| p.bone.as_deref().and_then(|b| by_name.get(b).copied())).collect();
+        let rest_inv = self
+            .parts_data
+            .iter()
+            .map(|p| sbox_math::Mat4::from_rotation_translation(sbox_math::Quat::from_xyzw(p.rotation[0], p.rotation[1], p.rotation[2], p.rotation[3]).normalize(), Vec3::from(p.position)).inverse())
+            .collect();
+        scene.add_component(root, RagdollSkin { skeleton: self.skeleton.clone(), bodies, bone_of, rest_inv, root, parts: self.parts.clone() });
+        log::info!("ragdoll: {} bodies, {} joints", self.parts_data.len(), self.joints.len());
+    }
+    impl_component_any!();
+}
+
 /// Simple fly camera: WASD + QE, arrow keys to look.
 #[derive(Default)]
 struct FlyCamera {
@@ -557,7 +647,19 @@ impl App {
                     log::warn!("animation skeleton {} not found; using model bone order", a.skeleton);
                     model::AnimSkeleton { names: md.skeleton.names.clone(), parents: md.skeleton.parents.clone() }
                 });
-            scene.add_component(root, Animator { anim: a, skeleton: md.skeleton.clone(), anim_skel, parts, time: 0.0 });
+            scene.add_component(root, Animator { anim: a, skeleton: md.skeleton.clone(), anim_skel, parts: parts.clone(), time: 0.0 });
+        }
+
+        if args.iter().any(|a| a == "--ragdoll") {
+            match &loaded.model.ragdoll {
+                Some((p, j)) => {
+                    scene.add_component(
+                    root,
+                    RagdollSwitch { skeleton: md.skeleton.clone(), parts_data: p.clone(), joints: j.clone(), parts: parts.clone(), floor_z: loaded.mins.z - center.z, auto_after: args.iter().position(|a| a == "--ragdoll-after").and_then(|i| args.get(i + 1)).and_then(|v| v.parse().ok()), done: false },
+                    );
+                }
+                None => log::warn!("--ragdoll: {path} has no jointed physics"),
+            }
         }
 
         let sun = scene.create_object("sun");
