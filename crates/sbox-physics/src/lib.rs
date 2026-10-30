@@ -127,6 +127,8 @@ pub struct Joint {
     pub collide: bool,
     /// A hinge (`phys_hinge`) turns only about the frames' X axis, limited by `twist_limit`; otherwise a ball joint.
     pub hinge: bool,
+    /// Which of the frames' axes (0 X, 1 Y, 2 Z) a hinge turns about.
+    pub hinge_axis: usize,
     /// Motors and springs on the joint's angular axes.
     pub drives: Vec<Drive>,
 }
@@ -134,7 +136,7 @@ pub struct Joint {
 impl Joint {
     /// A free ball joint between this object's body and `other`'s.
     pub fn new(other: GoId, frame1: Transform, frame2: Transform) -> Self {
-        Self { other, frame1, frame2, swing_limit: None, twist_limit: None, collide: false, hinge: false, drives: Vec::new() }
+        Self { other, frame1, frame2, swing_limit: None, twist_limit: None, collide: false, hinge: false, hinge_axis: 0, drives: Vec::new() }
     }
 }
 
@@ -359,21 +361,23 @@ impl Physics {
             let body = |g: GoId| Self::rigidbody_owner(scene, g).and_then(|o| self.body_of.get(&o).copied());
             let (Some(b1), Some(b2)) = (body(go), body(j.other)) else { continue };
             self.jointed.insert(go);
-            let mask = if j.hinge { JointAxesMask::LOCKED_REVOLUTE_AXES } else { JointAxesMask::LOCKED_SPHERICAL_AXES };
+            let free = [JointAxesMask::ANG_X, JointAxesMask::ANG_Y, JointAxesMask::ANG_Z][j.hinge_axis.min(2)];
+            let mask = if j.hinge { JointAxesMask::LOCKED_FIXED_AXES - free } else { JointAxesMask::LOCKED_SPHERICAL_AXES };
+            let twist_axis = if j.hinge { [JointAxis::AngX, JointAxis::AngY, JointAxis::AngZ][j.hinge_axis.min(2)] } else { JointAxis::AngX };
             let mut builder = GenericJointBuilder::new(mask)
                 .local_frame1(iso(&Transform::new(j.frame1.position, j.frame1.rotation, Vec3::ONE)))
                 .local_frame2(iso(&Transform::new(j.frame2.position, j.frame2.rotation, Vec3::ONE)))
                 .contacts_enabled(j.collide);
             // The frames' X axes are the twist axes: AngX is the twist, AngY / AngZ the swing about the other two.
             if let Some(t) = j.twist_limit {
-                builder = builder.limits(JointAxis::AngX, t);
+                builder = builder.limits(twist_axis, t);
             }
             if let Some(s) = j.swing_limit {
                 builder = builder.limits(JointAxis::AngY, [-s, s]).limits(JointAxis::AngZ, [-s, s]);
             }
             for d in &j.drives {
                 let axis = match d.axis {
-                    DriveAxis::Twist => JointAxis::AngX,
+                    DriveAxis::Twist => twist_axis,
                     DriveAxis::SwingY => JointAxis::AngY,
                     DriveAxis::SwingZ => JointAxis::AngZ,
                 };

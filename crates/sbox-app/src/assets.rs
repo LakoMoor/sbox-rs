@@ -84,6 +84,8 @@ pub fn spawn_ragdoll(scene: &mut Scene, root: &Transform, parts: &[sbox_resource
             twist_limit: j.twist,
             collide: j.collide,
             hinge: j.hinge,
+            // Picked by looking at the wheely bin: about X it tips over at once, about Z it flips, about Y it stays upright with its wheels and lid attached.
+            hinge_axis: 1,
             // The angular motor holds the joint at its target speed up to the given torque: friction when the target is zero.
             drives: j.motor.map(|(speed, torque)| sbox_physics::Drive { axis: sbox_physics::DriveAxis::Twist, mode: sbox_physics::DriveMode::Velocity { target: speed, factor: torque }, max_force: torque }).into_iter().collect(),
         };
