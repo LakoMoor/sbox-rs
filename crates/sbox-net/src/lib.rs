@@ -1187,5 +1187,46 @@ pub mod rpc {
             assert!(reg.dispatch(&mut log, "say", &[200]).is_err(), "garbage");
             assert_eq!(log.len(), 1, "rejected calls ran nothing");
         }
+
+        #[test]
+        fn typed_calls_travel_both_ways_to_registered_handlers() {
+            use crate::ServerEvent;
+            let mut server = Server::bind("127.0.0.1:0").unwrap();
+            let mut client = Client::connect(&server.local_addr().unwrap().to_string(), "c").unwrap();
+            let t = std::time::Instant::now();
+            let mut id = None;
+            while id.is_none() && t.elapsed().as_secs() < 2 {
+                for e in server.poll() {
+                    if let ServerEvent::Connected { client_id, .. } = e {
+                        id = Some(client_id);
+                    }
+                }
+                client.poll();
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            let id = id.expect("connected");
+            client.call_typed("teleport", &[Arg::Vec3([1.0, 2.0, 3.0]), Arg::Bool(true)]).unwrap();
+            server.call_typed(id, "notice", &[Arg::Str("hi".into())]).unwrap();
+            let mut on_server = Registry::<Vec<String>>::default();
+            on_server.register("teleport", &[Kind::Vec3, Kind::Bool], |log, a| log.push(format!("{a:?}")));
+            let mut on_client = Registry::<Vec<String>>::default();
+            on_client.register("notice", &[Kind::Str], |log, a| log.push(format!("{a:?}")));
+            let (mut s_log, mut c_log) = (Vec::new(), Vec::new());
+            let t = std::time::Instant::now();
+            while (s_log.is_empty() || c_log.is_empty()) && t.elapsed().as_secs() < 2 {
+                for e in server.poll() {
+                    if let ServerEvent::Rpc { name, args, .. } = e {
+                        on_server.dispatch(&mut s_log, &name, &args).unwrap();
+                    }
+                }
+                client.poll();
+                for (name, args) in client.take_rpcs() {
+                    on_client.dispatch(&mut c_log, &name, &args).unwrap();
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            assert_eq!(s_log, vec!["[Vec3([1.0, 2.0, 3.0]), Bool(true)]"]);
+            assert_eq!(c_log, vec!["[Str(\"hi\")]"]);
+        }
     }
 }

@@ -112,6 +112,26 @@ struct App {
     clipboard: Option<arboard::Clipboard>,
     /// A left-button press started in a text field and has not been released.
     dragging: bool,
+    /// Handlers for the RPCs this side accepts (host: `chat`; client: `notice`).
+    rpcs: sbox_net::rpc::Registry<Scene>,
+}
+
+/// Calls both sides understand: a client's `chat(text)` is logged by the host and answered with `notice`; `notice(text)` is
+/// logged by the client.
+fn net_rpcs() -> sbox_net::rpc::Registry<Scene> {
+    use sbox_net::rpc::{Arg, Kind, Registry};
+    let mut r = Registry::<Scene>::default();
+    r.register("chat", &[Kind::Str], |_, a| {
+        if let [Arg::Str(t)] = a {
+            log::info!("net: chat: {t}");
+        }
+    });
+    r.register("notice", &[Kind::Str], |_, a| {
+        if let [Arg::Str(t)] = a {
+            log::info!("net: server says: {t}");
+        }
+    });
+    r
 }
 
 /// `--host <addr>` serves the physics props to clients; `--join <addr>` mirrors a server's props.
@@ -309,6 +329,7 @@ impl App {
 
     /// Per-frame networking: the host handles clients and broadcasts props, a client applies the latest snapshot.
     fn pump_net(&mut self, dt: f32) {
+        use sbox_net::rpc::Arg;
         let spawn = self.camera.map_or(Vec3::Z * 64.0, |c| self.scene.world_transform(c).position);
         match &mut self.net {
             Some(Net::Host(server, players)) => {
@@ -317,12 +338,30 @@ impl App {
                         log::info!("net: {e:?}");
                     }
                     players.handle(&mut self.scene, &e, spawn);
+                    match &e {
+                        sbox_net::ServerEvent::Connected { client_id, name } => {
+                            let _ = server.call_typed(*client_id, "notice", &[Arg::Str(format!("welcome, {name}"))]);
+                        }
+                        sbox_net::ServerEvent::Rpc { client_id, name, args } => match self.rpcs.dispatch(&mut self.scene, name, args) {
+                            Ok(()) if name == "chat" => {
+                                let _ = server.call_typed(*client_id, "notice", &[Arg::Str("chat received".into())]);
+                            }
+                            Ok(()) => {}
+                            Err(err) => log::warn!("net: rejected rpc from {client_id}: {err}"),
+                        },
+                        _ => {}
+                    }
                 }
                 server.broadcast(&sbox_net::replication::collect(&self.scene));
             }
             Some(Net::Join(client, last_try, prediction, interp)) => {
                 use sbox_net::replication::{apply_except, apply_interpolated, PLAYER_ID_BASE};
                 client.poll();
+                for (name, args) in client.take_rpcs() {
+                    if let Err(err) = self.rpcs.dispatch(&mut self.scene, &name, &args) {
+                        log::warn!("net: rejected rpc {name:?}: {err}");
+                    }
+                }
                 let mut own = None;
                 if client.client_id.is_none() && last_try.elapsed().as_secs_f32() > 0.5 {
                     client.retry_connect("player");
@@ -807,7 +846,7 @@ fn main() -> anyhow::Result<()> {
     env_logger::init();
     let el = EventLoop::new()?;
     el.set_control_flow(ControlFlow::Poll);
-    let mut app = App { window: None, renderer: None, scene: Scene::new(), camera: None, last: Instant::now(), audio: None, ui: None, ui_font: None, cursor: (0.0, 0.0), net: None, mods: Default::default(), player_mesh: None, clipboard: arboard::Clipboard::new().ok(), dragging: false };
+    let mut app = App { window: None, renderer: None, scene: Scene::new(), camera: None, last: Instant::now(), audio: None, ui: None, ui_font: None, cursor: (0.0, 0.0), net: None, mods: Default::default(), player_mesh: None, clipboard: arboard::Clipboard::new().ok(), dragging: false, rpcs: net_rpcs() };
     el.run_app(&mut app)?;
     Ok(())
 }
