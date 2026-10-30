@@ -21,6 +21,9 @@ pub type Handler = Box<dyn FnMut(&mut HashMap<String, String>) -> Effect>;
 pub struct Page {
     doc: Document,
     pub values: HashMap<String, String>,
+    /// Opacity and scale from the scene's `ScreenPanel` (1, 1 without one).
+    pub opacity: f32,
+    pub scale: f32,
     handlers: HashMap<String, Handler>,
     /// Where the page's widgets sit in the UI vectors, so a re-layout replaces them and leaves the rest alone.
     panels: Range<usize>,
@@ -30,7 +33,7 @@ pub struct Page {
 
 impl Page {
     pub fn new(doc: Document, values: HashMap<String, String>) -> Self {
-        let mut p = Self { doc, values, handlers: HashMap::new(), panels: 0..0, labels: 0..0, buttons: 0..0 };
+        let mut p = Self { doc, values, opacity: 1.0, scale: 1.0, handlers: HashMap::new(), panels: 0..0, labels: 0..0, buttons: 0..0 };
         p.register_defaults();
         p
     }
@@ -69,25 +72,29 @@ impl Page {
         ui.panels.drain(self.panels.clone());
         ui.labels.drain(self.labels.clone());
         ui.buttons.drain(self.buttons.clone());
+        let (k, a) = (self.scale, self.opacity);
+        // Laid out at 1x and then scaled, so the page keeps its proportions.
         let (items, content) = razor_ui::layout_bound(&self.doc, 40.0, 40.0, 520.0, &self.values);
-        ui.content_height = 40.0 + content + 40.0;
+        ui.content_height = (40.0 + content + 40.0) * k;
+        let r4 = |r: [f32; 4]| [r[0] * k, r[1] * k, r[2] * k, r[3] * k];
+        let fade = |c: [f32; 4]| [c[0], c[1], c[2], c[3] * a];
         // The page is always the first thing in the UI after the HUD, so appending is where its old widgets were.
         self.panels = ui.panels.len()..ui.panels.len();
         self.labels = ui.labels.len()..ui.labels.len();
         self.buttons = ui.buttons.len()..ui.buttons.len();
         for item in items {
             match item {
-                Item::Panel { rect, color } => ui.panels.push(ui::Panel { rect, color }),
+                Item::Panel { rect, color } => ui.panels.push(ui::Panel { rect: r4(rect), color: fade(color) }),
                 Item::Text { text, size, color, rect } => {
-                    let (texture, [w, h]) = crate::App::text_texture(r, font, &text, size);
-                    ui.labels.push(ui::Label { texture, rect: [rect[0], rect[1], w, h], tint: color });
+                    let (texture, [w, h]) = crate::App::text_texture(r, font, &text, size * k);
+                    ui.labels.push(ui::Label { texture, rect: [rect[0] * k, rect[1] * k, w, h], tint: fade(color) });
                 }
                 Item::Button { id, text, rect, color } => ui.buttons.push(ui::Button {
                     id,
-                    rect,
-                    color: color.unwrap_or([0.18, 0.2, 0.3, 1.0]),
-                    hover_color: [0.3, 0.4, 0.7, 1.0],
-                    label: Some(crate::App::text_texture(r, font, &text, 24.0)),
+                    rect: r4(rect),
+                    color: fade(color.unwrap_or([0.18, 0.2, 0.3, 1.0])),
+                    hover_color: fade([0.3, 0.4, 0.7, 1.0]),
+                    label: Some(crate::App::text_texture(r, font, &text, 24.0 * k)),
                 }),
             }
         }
@@ -123,6 +130,12 @@ mod tests {
         assert_eq!(p.values["Show"], "true");
         p.click("Toggle");
         assert_eq!(p.values["Show"], "false");
+    }
+
+    #[test]
+    fn screen_panel_settings_default_to_identity() {
+        let p = page("<root/>");
+        assert_eq!((p.opacity, p.scale), (1.0, 1.0));
     }
 
     #[test]

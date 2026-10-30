@@ -128,6 +128,38 @@ impl Component for Bloom {
     impl_component_any!();
 }
 
+/// `ScreenPanel`: the root the scene's UI is drawn from on screen. The app applies its opacity and scale to the Razor page.
+pub struct ScreenPanel {
+    pub opacity: f32,
+    pub scale: f32,
+    pub z_index: i32,
+}
+
+impl Default for ScreenPanel {
+    fn default() -> Self {
+        Self { opacity: 1.0, scale: 1.0, z_index: 100 }
+    }
+}
+impl Component for ScreenPanel {
+    impl_component_any!();
+}
+
+/// `WorldPanel`: UI placed in the world. Only the properties are kept; nothing renders a panel onto a quad yet.
+pub struct WorldPanel {
+    pub panel_size: [f32; 2],
+    pub render_scale: f32,
+    pub look_at_camera: bool,
+}
+
+impl Default for WorldPanel {
+    fn default() -> Self {
+        Self { panel_size: [512.0, 512.0], render_scale: 1.0, look_at_camera: false }
+    }
+}
+impl Component for WorldPanel {
+    impl_component_any!();
+}
+
 /// Darkens the screen edges.
 pub struct Vignette {
     pub intensity: f32,

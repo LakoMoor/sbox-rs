@@ -440,6 +440,23 @@ impl ComponentLoader for SceneLoader<'_> {
                 true
             }
             "EnvmapProbe" => true,
+            "ScreenPanel" => {
+                let f = |k: &str, d: f64| p.get(k).and_then(Value::as_f64).unwrap_or(d) as f32;
+                scene.add_component(go, sbox_scene::ScreenPanel { opacity: f("Opacity", 1.0), scale: f("Scale", 1.0).max(0.001), z_index: f("ZIndex", 100.0) as i32 });
+                true
+            }
+            "WorldPanel" => {
+                let size = p.get("PanelSize").map(|v| parse_vec3(Some(v), Vec3::new(512.0, 512.0, 0.0))).unwrap_or(Vec3::new(512.0, 512.0, 0.0));
+                scene.add_component(
+                    go,
+                    sbox_scene::WorldPanel {
+                        panel_size: [size.x, size.y],
+                        render_scale: p.get("RenderScale").and_then(Value::as_f64).unwrap_or(1.0) as f32,
+                        look_at_camera: p.get("LookAtCamera").and_then(Value::as_bool).unwrap_or(false),
+                    },
+                );
+                true
+            }
             "DirectionalLight" => {
                 let c = parse_color(p.get("LightColor"), [1.0; 4]);
                 let a = parse_color(p.get("SkyColor"), [0.15, 0.17, 0.2, 1.0]);

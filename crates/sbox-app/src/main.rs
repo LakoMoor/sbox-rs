@@ -582,6 +582,14 @@ impl ApplicationHandler for App {
         if let Some((ui, font, page)) = Self::build_ui(&mut renderer, &args) {
             self.ui = Some(ui);
             self.page = page;
+            // A `ScreenPanel` in the scene sets the page's opacity and scale.
+            if let (Some(p), Some((_, sp))) = (&mut self.page, self.scene.iter_components::<sbox_scene::ScreenPanel>().next()) {
+                p.opacity = sp.opacity;
+                p.scale = sp.scale;
+                if let (Some(ui), Some(font)) = (&mut self.ui, &self.ui_font) {
+                    p.populate(ui, &mut renderer, font);
+                }
+            }
             self.ui_font = Some(font);
         }
         if let Some(ui) = &self.ui {
