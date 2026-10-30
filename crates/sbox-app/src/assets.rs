@@ -181,7 +181,14 @@ impl Assets {
             additive: false,
             alpha_cutoff: if m.flag("F_ALPHA_TEST") { m.float("g_flAlphaTestReference", 0.5) } else { 0.0 },
         };
-        crate::families::Family::of(&m.shader).apply(&mut desc);
+        let family = crate::families::Family::of(&m.shader);
+        family.apply(&mut desc);
+        if family == crate::families::Family::Eye {
+            let iris = m.vectors.get("g_vIrisColor").map_or([0.3, 0.2, 0.1], |v| [v[0], v[1], v[2]]);
+            let center = m.vectors.get("g_vIrisCenter").map_or([0.5, 0.5], |v| [v[0], v[1]]);
+            let img = crate::families::eye_texture(iris, m.float("g_flPupilSize", 0.3), m.float("g_flIrisRadius", 0.2), center, 256);
+            desc.color = Some(r.upload_rgba8(&img, 256, 256, true));
+        }
         r.create_material_ex(&desc)
     }
 
