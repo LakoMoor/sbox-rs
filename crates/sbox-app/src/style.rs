@@ -1,5 +1,7 @@
-//! A small CSS subset for Razor panels: declarations (`style="..."`) and flat rules (`tag`, `.class`, `tag.class`, comma
-//! lists). No nesting (SCSS), combinators, pseudo-classes, units other than `px`, or variables; such rules are ignored.
+//! A small CSS subset for Razor panels: declarations (`style="..."`) and rules on one element (`tag`, `.class`,
+//! `tag.class`, comma lists). SCSS nesting is flattened: `&.on { }` inside `.btn { }` becomes `.btn.on`. Descendant
+//! selectors (`.a .b`, also what plain nesting means), combinators, pseudo-classes, units other than `px`, and variables
+//! are not supported and such rules are ignored.
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Style {
@@ -84,6 +86,46 @@ impl Style {
     }
 }
 
+/// Split a block body into its own declarations and its nested rules (selector list, body).
+fn split_block(src: &str) -> (String, Vec<(String, String)>) {
+    let mut decls = String::new();
+    let mut nested = Vec::new();
+    let mut chunk = String::new();
+    let mut chars = src.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            ';' => {
+                decls.push_str(&chunk);
+                decls.push(';');
+                chunk.clear();
+            }
+            '{' => {
+                let mut depth = 1;
+                let mut body = String::new();
+                for c in chars.by_ref() {
+                    match c {
+                        '{' => depth += 1,
+                        '}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    body.push(c);
+                }
+                nested.push((chunk.trim().to_string(), body));
+                chunk.clear();
+            }
+            _ => chunk.push(c),
+        }
+    }
+    // A last declaration without its `;`.
+    decls.push_str(&chunk);
+    (decls, nested)
+}
+
 #[derive(Clone, Debug, PartialEq)]
 struct Selector {
     tag: Option<String>,
@@ -113,40 +155,37 @@ impl Stylesheet {
             cleaned = out;
             rest = &cleaned;
         }
-        while let Some(open) = rest.find('{') {
-            let sel = rest[..open].trim();
-            // The body ends at the matching brace; a nested `{` makes the rule SCSS-style and it is skipped.
-            let mut depth = 1;
-            let mut end = None;
-            for (i, c) in rest[open + 1..].char_indices() {
-                match c {
-                    '{' => depth += 1,
-                    '}' => {
-                        depth -= 1;
-                        if depth == 0 {
-                            end = Some(open + 1 + i);
-                            break;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            let Some(end) = end else { break };
-            let body = &rest[open + 1..end];
-            if !body.contains('{') {
-                for s in sel.split(',') {
-                    if let Some(sel) = Self::selector(s.trim()) {
-                        sheet.rules.push((sel, parse_declarations(body)));
-                    }
-                }
-            }
-            rest = &rest[end + 1..];
-        }
+        sheet.add_rules(rest, &[]);
         sheet
     }
 
+    /// Parse the rules in `src`, resolving nested selectors against `parents` (the enclosing rule's selectors).
+    fn add_rules(&mut self, src: &str, parents: &[String]) {
+        let (decls, nested) = split_block(src);
+        if !parents.is_empty() && !decls.is_empty() {
+            for sel in parents {
+                if let Some(sel) = Self::selector(sel) {
+                    self.rules.push((sel, parse_declarations(&decls)));
+                }
+            }
+        }
+        for (sel_list, body) in nested {
+            let mut resolved = Vec::new();
+            for s in sel_list.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                if parents.is_empty() {
+                    resolved.push(s.to_string());
+                } else {
+                    for p in parents {
+                        resolved.push(if s.contains('&') { s.replace('&', p) } else { format!("{p} {s}") });
+                    }
+                }
+            }
+            self.add_rules(&body, &resolved);
+        }
+    }
+
     fn selector(s: &str) -> Option<Selector> {
-        if s.is_empty() || s.contains(|c: char| c.is_whitespace() || matches!(c, '>' | '+' | '~' | ':' | '&' | '[' | '#' | '*' | '@')) {
+        if s.is_empty() || s.contains(|c: char| c.is_whitespace() || matches!(c, '>' | '+' | '~' | ':' | '[' | '#' | '*' | '@')) {
             return None;
         }
         let mut parts = s.split('.');
@@ -206,5 +245,20 @@ mod tests {
         assert_eq!(sheet.compute("div", &["title"], "", Style::default()).color, Some([0.0, 0.5, 0.0, 1.0]));
         // Combinators, pseudo-classes and nested rules are ignored.
         assert_eq!(sheet.compute("div", &["a", "b", "x", "n", "m"], "", Style::default()).color, None);
+    }
+
+    #[test]
+    fn scss_nesting_is_flattened() {
+        let sheet = Stylesheet::parse(".btn { color: red; font-size: 10px; &.on { color: blue } &.big, &.huge { font-size: 40px; } .inner { color: green } &:hover { color: white } @media (x) { .q { color: black } } }\nlabel { &.t { width: 5px } }");
+        let c = |tag: &str, cls: &[&str]| sheet.compute(tag, cls, "", Style::default());
+        assert_eq!(c("div", &["btn"]).color, Some([1.0, 0.0, 0.0, 1.0]), "the rule's own declarations survive nesting");
+        assert_eq!(c("div", &["btn", "on"]).color, Some([0.0, 0.0, 1.0, 1.0]));
+        assert_eq!(c("div", &["btn", "on"]).font_size, Some(10.0));
+        assert_eq!(c("div", &["btn", "big"]).font_size, Some(40.0));
+        assert_eq!(c("div", &["btn", "huge"]).font_size, Some(40.0));
+        assert_eq!(c("div", &["inner"]).color, None, "descendant rules are not applied to a bare .inner");
+        assert_eq!(c("div", &["q"]).color, None);
+        assert_eq!(c("label", &["t"]).width, Some(5.0), "& after a tag name");
+        assert_eq!(c("label", &[]).width, None);
     }
 }
