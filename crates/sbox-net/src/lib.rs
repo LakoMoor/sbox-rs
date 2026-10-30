@@ -997,3 +997,195 @@ pub mod replication {
         }
     }
 }
+
+/// Typed RPC arguments and a registry that dispatches calls to handlers by name, checking the argument types first.
+/// The wire format is a tag byte per value; the whole list must fit [`MAX_RPC_ARGS`].
+pub mod rpc {
+    use super::{Client, Server, MAX_RPC_ARGS};
+    use anyhow::{bail, Result};
+    use std::collections::HashMap;
+
+    #[derive(Clone, Debug, PartialEq)]
+    pub enum Arg {
+        Bool(bool),
+        Int(i64),
+        Float(f32),
+        Str(String),
+        Vec3([f32; 3]),
+    }
+
+    /// The type of an [`Arg`], for declaring handler signatures.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Kind {
+        Bool,
+        Int,
+        Float,
+        Str,
+        Vec3,
+    }
+
+    impl Arg {
+        pub fn kind(&self) -> Kind {
+            match self {
+                Arg::Bool(_) => Kind::Bool,
+                Arg::Int(_) => Kind::Int,
+                Arg::Float(_) => Kind::Float,
+                Arg::Str(_) => Kind::Str,
+                Arg::Vec3(_) => Kind::Vec3,
+            }
+        }
+    }
+
+    pub fn encode(args: &[Arg]) -> Result<Vec<u8>> {
+        let mut out = Vec::new();
+        for a in args {
+            match a {
+                Arg::Bool(b) => out.extend([0, *b as u8]),
+                Arg::Int(i) => {
+                    out.push(1);
+                    out.extend(i.to_le_bytes());
+                }
+                Arg::Float(f) => {
+                    out.push(2);
+                    out.extend(f.to_le_bytes());
+                }
+                Arg::Str(s) => {
+                    if s.len() > u16::MAX as usize {
+                        bail!("string argument too long");
+                    }
+                    out.push(3);
+                    out.extend((s.len() as u16).to_le_bytes());
+                    out.extend(s.as_bytes());
+                }
+                Arg::Vec3(v) => {
+                    out.push(4);
+                    for c in v {
+                        out.extend(c.to_le_bytes());
+                    }
+                }
+            }
+        }
+        if out.len() > MAX_RPC_ARGS {
+            bail!("arguments take {} bytes, the limit is {MAX_RPC_ARGS}", out.len());
+        }
+        Ok(out)
+    }
+
+    pub fn decode(mut data: &[u8]) -> Result<Vec<Arg>> {
+        fn take<'a>(d: &mut &'a [u8], n: usize) -> Result<&'a [u8]> {
+            if d.len() < n {
+                bail!("truncated arguments");
+            }
+            let (a, b) = d.split_at(n);
+            *d = b;
+            Ok(a)
+        }
+        let mut out = Vec::new();
+        while !data.is_empty() {
+            let tag = take(&mut data, 1)?[0];
+            out.push(match tag {
+                0 => Arg::Bool(take(&mut data, 1)?[0] != 0),
+                1 => Arg::Int(i64::from_le_bytes(take(&mut data, 8)?.try_into()?)),
+                2 => Arg::Float(f32::from_le_bytes(take(&mut data, 4)?.try_into()?)),
+                3 => {
+                    let n = u16::from_le_bytes(take(&mut data, 2)?.try_into()?) as usize;
+                    Arg::Str(String::from_utf8_lossy(take(&mut data, n)?).into_owned())
+                }
+                4 => {
+                    let mut v = [0.0; 3];
+                    for c in &mut v {
+                        *c = f32::from_le_bytes(take(&mut data, 4)?.try_into()?);
+                    }
+                    Arg::Vec3(v)
+                }
+                t => bail!("unknown argument tag {t}"),
+            });
+        }
+        Ok(out)
+    }
+
+    impl Client {
+        /// Typed reliable call on the server.
+        pub fn call_typed(&mut self, name: &str, args: &[Arg]) -> Result<()> {
+            self.call(name, &encode(args)?)
+        }
+    }
+
+    impl Server {
+        /// Typed reliable call on a client.
+        pub fn call_typed(&mut self, client_id: u32, name: &str, args: &[Arg]) -> Result<()> {
+            self.call(client_id, name, &encode(args)?)
+        }
+    }
+
+    type Handler<C> = Box<dyn FnMut(&mut C, &[Arg])>;
+
+    /// Handlers by RPC name; `C` is whatever context they act on (the scene, the game state, ...).
+    pub struct Registry<C> {
+        handlers: HashMap<String, (Vec<Kind>, Handler<C>)>,
+    }
+
+    impl<C> Default for Registry<C> {
+        fn default() -> Self {
+            Self { handlers: HashMap::new() }
+        }
+    }
+
+    impl<C> Registry<C> {
+        /// Declare `name` with its argument types; a later registration of the same name replaces the earlier one.
+        pub fn register(&mut self, name: &str, signature: &[Kind], handler: impl FnMut(&mut C, &[Arg]) + 'static) {
+            self.handlers.insert(name.to_string(), (signature.to_vec(), Box::new(handler)));
+        }
+
+        /// Run the handler for a received call. Unknown names, undecodable arguments and arguments that do not match
+        /// the signature are rejected without running anything (remote input is untrusted).
+        pub fn dispatch(&mut self, ctx: &mut C, name: &str, args: &[u8]) -> Result<()> {
+            let Some((signature, handler)) = self.handlers.get_mut(name) else { bail!("no rpc named {name:?}") };
+            let args = decode(args)?;
+            let got: Vec<Kind> = args.iter().map(Arg::kind).collect();
+            if got != *signature {
+                bail!("rpc {name:?} takes {signature:?}, got {got:?}");
+            }
+            handler(ctx, &args);
+            Ok(())
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn arguments_round_trip() {
+            let args = vec![Arg::Bool(true), Arg::Int(-5_000_000_000), Arg::Float(1.5), Arg::Str("héllo".into()), Arg::Vec3([1.0, -2.0, 3.5]), Arg::Str(String::new())];
+            assert_eq!(decode(&encode(&args).unwrap()).unwrap(), args);
+            assert_eq!(decode(&[]).unwrap(), vec![]);
+        }
+
+        #[test]
+        fn bad_arguments_are_errors() {
+            assert!(decode(&[9]).is_err(), "unknown tag");
+            assert!(decode(&[1, 0, 0]).is_err(), "truncated int");
+            assert!(decode(&[3, 5, 0, b'a']).is_err(), "string shorter than its length");
+            assert!(encode(&[Arg::Str("x".repeat(MAX_RPC_ARGS))]).is_err(), "too big for one packet");
+        }
+
+        #[test]
+        fn the_registry_checks_names_and_signatures_before_running() {
+            let mut log: Vec<String> = Vec::new();
+            let mut reg = Registry::<Vec<String>>::default();
+            reg.register("say", &[Kind::Str, Kind::Int], |log, a| {
+                if let [Arg::Str(s), Arg::Int(n)] = a {
+                    log.push(format!("{s}x{n}"));
+                }
+            });
+            reg.dispatch(&mut log, "say", &encode(&[Arg::Str("hi".into()), Arg::Int(3)]).unwrap()).unwrap();
+            assert_eq!(log, vec!["hix3"]);
+            assert!(reg.dispatch(&mut log, "nope", &[]).is_err());
+            assert!(reg.dispatch(&mut log, "say", &encode(&[Arg::Int(3), Arg::Str("hi".into())]).unwrap()).is_err(), "wrong order");
+            assert!(reg.dispatch(&mut log, "say", &encode(&[Arg::Str("hi".into())]).unwrap()).is_err(), "missing argument");
+            assert!(reg.dispatch(&mut log, "say", &[200]).is_err(), "garbage");
+            assert_eq!(log.len(), 1, "rejected calls ran nothing");
+        }
+    }
+}
