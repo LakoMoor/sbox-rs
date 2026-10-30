@@ -6,6 +6,7 @@ mod layout;
 mod meshcomp;
 mod page;
 mod props;
+mod worldpanel;
 #[allow(dead_code)]
 mod razor;
 mod razor_ui;
@@ -170,6 +171,17 @@ impl Component for Billboard {
     impl_component_any!();
 }
 
+/// The `--world-panel` page: what was drawn (to find buttons under a click) and what is needed to draw it again.
+struct WorldPanelState {
+    go: sbox_scene::GoId,
+    page: page::Page,
+    items: Vec<razor_ui::Item>,
+    /// Size of the quad in world units and of its bitmap in pixels.
+    size: [f32; 2],
+    pixels: (u32, u32),
+    font: ab_glyph::FontVec,
+}
+
 /// Simple fly camera: WASD + QE, arrow keys to look.
 #[derive(Default)]
 struct FlyCamera {
@@ -222,6 +234,7 @@ struct App {
     dragging: bool,
     /// The `--razor` page, if any, with its bound values and click handlers.
     page: Option<page::Page>,
+    world_panel: Option<WorldPanelState>,
     /// Handlers for the RPCs this side accepts (host: `chat`; client: `notice`).
     rpcs: sbox_net::rpc::Registry<Scene>,
 }
@@ -329,21 +342,25 @@ impl App {
     /// `--world-panel <file.razor>` puts the page on a quad in the world, 600 units in front of the camera with its top edge 120 above eye level: the page is laid
     /// out at the `WorldPanel`'s size, drawn into a bitmap on the CPU and shown as an unlit translucent texture.
     /// `--world-panel-look` makes it face the camera. Needs a font from a path argument inside the game directory.
-    fn build_world_panel(scene: &mut Scene, r: &mut Renderer, cam: sbox_scene::GoId, args: &[String]) {
-        let Some(path) = args.iter().position(|a| a == "--world-panel").and_then(|i| args.get(i + 1)) else { return };
+    fn build_world_panel(scene: &mut Scene, r: &mut Renderer, cam: sbox_scene::GoId, args: &[String]) -> Option<WorldPanelState> {
+        let path = args.iter().position(|a| a == "--world-panel").and_then(|i| args.get(i + 1))?;
         let Some(font) = Self::load_ui_font(args) else {
             log::warn!("--world-panel: no font found (pass a path inside the game directory)");
-            return;
+            return None;
         };
         let doc = match std::fs::read_to_string(path).map_err(anyhow::Error::from).and_then(|src| razor::parse(&src)) {
             Ok(d) => d,
-            Err(e) => return log::error!("--world-panel {path}: {e:#}"),
+            Err(e) => {
+                log::error!("--world-panel {path}: {e:#}");
+                return None;
+            }
         };
         let values: std::collections::HashMap<String, String> =
             args.windows(2).filter(|w| w[0] == "--bind").filter_map(|w| w[1].split_once('=').map(|(k, v)| (k.to_string(), v.to_string()))).collect();
         let panel = sbox_scene::WorldPanel { look_at_camera: args.iter().any(|a| a == "--world-panel-look"), ..Default::default() };
         let (pw, ph) = ((panel.panel_size[0] * panel.render_scale) as u32, (panel.panel_size[1] * panel.render_scale) as u32);
-        let (items, _) = razor_ui::layout_bound(&doc, 0.0, 0.0, pw as f32, &values);
+        let page = page::Page::new(doc, values);
+        let items = page.items(pw as f32);
         let img = page::bitmap(&items, pw, ph, Some(&font));
         let tex = r.upload_rgba8(&img, pw, ph, true);
         let mat = r.create_material_ex(&sbox_render::MaterialDesc { color: Some(tex), unlit: true, translucent: true, ..Default::default() });
@@ -365,7 +382,32 @@ impl App {
         if panel.look_at_camera {
             scene.add_component(go, Billboard { camera: cam });
         }
+        let size = panel.panel_size;
         scene.add_component(go, panel);
+        Some(WorldPanelState { go, page, items, size, pixels: (pw, ph), font })
+    }
+
+    /// A click at the cursor: if it lands on a button of the world panel, run the handler and redraw the panel.
+    /// Returns whether the click was used.
+    fn click_world_panel(&mut self) -> bool {
+        let (Some(wp), Some(cam), Some(r), Some(w)) = (&mut self.world_panel, self.camera, &mut self.renderer, &self.window) else { return false };
+        let fov = self.scene.component::<CameraComponent>(cam).map_or(60.0, |c| c.field_of_view);
+        let sz = w.inner_size();
+        let (origin, dir) = worldpanel::camera_ray(&self.scene.world_transform(cam), fov, sz.width as f32, sz.height as f32, self.cursor.0, self.cursor.1);
+        let Some([u, v]) = worldpanel::panel_uv(&self.scene.world_transform(wp.go), wp.size, origin, dir) else { return false };
+        let Some(id) = worldpanel::hit_button(&wp.items, u * wp.pixels.0 as f32, v * wp.pixels.1 as f32).map(String::from) else { return false };
+        log::info!("world panel: clicked {id}");
+        if wp.page.click(&id) == Some(page::Effect::Quit) {
+            return true;
+        }
+        wp.items = wp.page.items(wp.pixels.0 as f32);
+        let img = page::bitmap(&wp.items, wp.pixels.0, wp.pixels.1, Some(&wp.font));
+        let tex = r.upload_rgba8(&img, wp.pixels.0, wp.pixels.1, true);
+        let mat = r.create_material_ex(&sbox_render::MaterialDesc { color: Some(tex), unlit: true, translucent: true, ..Default::default() });
+        if let Some(m) = self.scene.component_mut::<ModelRenderer>(wp.go) {
+            m.material = mat;
+        }
+        true
     }
 
     /// `--hud "text"` shows a label in the top-left corner; `--ui-demo` adds a panel with Play / Quit buttons.
@@ -753,7 +795,7 @@ impl ApplicationHandler for App {
         let model = args.iter().find(|a| !a.starts_with("--") && a.ends_with(".vmdl_c")).cloned();
         self.camera = Some(Self::build_scene(&mut self.scene, &mut renderer, model.as_deref(), args.iter().position(|a| a == "--anim").and_then(|i| args.get(i + 1)).map(String::as_str), args.iter().position(|a| a == "--scene").and_then(|i| args.get(i + 1)).map(String::as_str)));
         if let Some(cam) = self.camera {
-            Self::build_world_panel(&mut self.scene, &mut renderer, cam, &args);
+            self.world_panel = Self::build_world_panel(&mut self.scene, &mut renderer, cam, &args);
         }
         // `--ssr` turns on screen-space reflections without needing a scene file that has the component.
         if args.iter().any(|a| a == "--ssr") {
@@ -998,6 +1040,9 @@ impl ApplicationHandler for App {
                     }
                     return;
                 }
+                if self.click_world_panel() {
+                    return;
+                }
                 if let (Some(w), Some(input)) = (&self.window, self.scene.resource_mut::<Input>()) {
                     input.set("Attack1", true);
                     if std::env::args().any(|a| a == "--play") {
@@ -1035,7 +1080,7 @@ fn main() -> anyhow::Result<()> {
     env_logger::init();
     let el = EventLoop::new()?;
     el.set_control_flow(ControlFlow::Poll);
-    let mut app = App { window: None, renderer: None, scene: Scene::new(), camera: None, last: Instant::now(), audio: None, ui: None, ui_font: None, cursor: (0.0, 0.0), net: None, mods: Default::default(), player_mesh: None, clipboard: arboard::Clipboard::new().ok(), dragging: false, page: None, rpcs: net_rpcs() };
+    let mut app = App { window: None, renderer: None, scene: Scene::new(), camera: None, last: Instant::now(), audio: None, ui: None, ui_font: None, cursor: (0.0, 0.0), net: None, mods: Default::default(), player_mesh: None, clipboard: arboard::Clipboard::new().ok(), dragging: false, page: None, world_panel: None, rpcs: net_rpcs() };
     el.run_app(&mut app)?;
     Ok(())
 }

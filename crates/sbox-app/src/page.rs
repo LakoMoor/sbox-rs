@@ -69,6 +69,11 @@ impl Page {
         Some(handler(&mut self.values))
     }
 
+    /// The page laid out at `width` pixels from the origin, with the current values (for drawing it somewhere other than the screen).
+    pub fn items(&self, width: f32) -> Vec<Item> {
+        razor_ui::layout_bound(&self.doc, 0.0, 0.0, width, &self.values).0
+    }
+
     /// (Re)build the page's widgets: whatever an earlier call added is removed first.
     pub fn populate(&mut self, ui: &mut Ui, r: &mut Renderer, font: &ab_glyph::FontVec) {
         ui.panels.drain(self.panels.clone());
