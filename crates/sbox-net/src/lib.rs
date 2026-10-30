@@ -31,7 +31,8 @@ pub enum Packet {
     /// `ack` is the last input of the receiving client that the server has applied. A tick's entities may span several
     /// packets (`part` of `parts`); they hold only what changed since the last tick the client acknowledged
     /// ([`Packet::SnapshotAck`]), the client keeps the rest as it was.
-    Snapshot { tick: u32, ack: u32, part: u8, parts: u8, entities: Vec<EntityState> },
+    /// `removed` lists entities that existed in the client's base state but are gone now.
+    Snapshot { tick: u32, ack: u32, part: u8, parts: u8, entities: Vec<EntityState>, removed: Vec<u32> },
     /// The client has received every packet of the snapshot of this tick.
     SnapshotAck { tick: u32 },
     Disconnect,
@@ -41,6 +42,8 @@ pub enum Packet {
 }
 
 /// Largest RPC name and argument sizes; a call must fit one packet.
+/// Most removed entity ids one snapshot packet carries (they take a few entities' worth of space).
+pub const MAX_REMOVED: usize = 32;
 pub const MAX_RPC_NAME: usize = 64;
 pub const MAX_RPC_ARGS: usize = 1000;
 
@@ -98,7 +101,7 @@ impl Packet {
                 }
                 w.u32(*buttons);
             }
-            Packet::Snapshot { tick, ack, part, parts, entities } => {
+            Packet::Snapshot { tick, ack, part, parts, entities, removed } => {
                 w.0.push(4);
                 w.u32(*tick);
                 w.u32(*ack);
@@ -110,6 +113,10 @@ impl Packet {
                     for v in e.position.iter().chain(&e.rotation) {
                         w.f32(*v);
                     }
+                }
+                w.0.push(removed.len().min(MAX_REMOVED) as u8);
+                for id in removed.iter().take(MAX_REMOVED) {
+                    w.u32(*id);
                 }
             }
             Packet::Disconnect => w.0.push(5),
@@ -162,7 +169,15 @@ impl Packet {
                 for _ in 0..n {
                     entities.push(EntityState { id: r.u32()?, position: [r.f32()?, r.f32()?, r.f32()?], rotation: [r.f32()?, r.f32()?, r.f32()?, r.f32()?] });
                 }
-                Packet::Snapshot { tick, ack, part, parts, entities }
+                let k = r.u8()? as usize;
+                if k > MAX_REMOVED {
+                    bail!("too many removals")
+                }
+                let mut removed = Vec::with_capacity(k);
+                for _ in 0..k {
+                    removed.push(r.u32()?);
+                }
+                Packet::Snapshot { tick, ack, part, parts, entities, removed }
             }
             5 => Packet::Disconnect,
             6 => {
@@ -388,15 +403,19 @@ impl Server {
         while self.history.len() > HISTORY_TICKS {
             self.history.pop_front();
         }
-        let per_packet = MAX_PACKET / ENTITY_BYTES - 1;
+        let per_packet = MAX_PACKET / ENTITY_BYTES - 1 - (MAX_REMOVED * 4).div_ceil(ENTITY_BYTES);
         for (addr, id) in &self.clients {
             let base = self.baseline.get(id).and_then(|t| self.history.iter().find(|(h, _)| h == t)).map(|(_, m)| m);
             let changed: Vec<EntityState> = entities.iter().filter(|e| base.map_or(true, |b| b.get(&e.id) != Some(*e))).copied().collect();
+            let gone: Vec<u32> = base.map_or_else(Vec::new, |b| b.keys().filter(|k| !entities.iter().any(|e| e.id == **k)).copied().collect());
             let ack = self.acked.get(id).copied().unwrap_or(0);
-            let chunks: Vec<&[EntityState]> = if changed.is_empty() { vec![&[]] } else { changed.chunks(per_packet).collect() };
-            let parts = chunks.len().min(255) as u8;
-            for (i, chunk) in chunks.into_iter().take(255).enumerate() {
-                let data = Packet::Snapshot { tick: self.tick, ack, part: i as u8, parts, entities: chunk.to_vec() }.encode();
+            let chunks: Vec<&[EntityState]> = changed.chunks(per_packet).collect();
+            let gone_chunks: Vec<&[u32]> = gone.chunks(MAX_REMOVED).collect();
+            let parts = chunks.len().max(gone_chunks.len()).max(1).min(255);
+            for i in 0..parts {
+                let entities = chunks.get(i).map_or_else(Vec::new, |c| c.to_vec());
+                let removed = gone_chunks.get(i).map_or_else(Vec::new, |c| c.to_vec());
+                let data = Packet::Snapshot { tick: self.tick, ack, part: i as u8, parts: parts as u8, entities, removed }.encode();
                 let _ = self.socket.send_to(&data, addr);
             }
         }
@@ -415,6 +434,8 @@ pub struct Client {
     pub entities: HashMap<u32, EntityState>,
     /// Entities received in snapshot packets so far (deltas make this much smaller than snapshots x entities).
     pub received_entities: u64,
+    /// Ids the server announced as removed, until [`Client::take_removed`].
+    removed: Vec<u32>,
     /// Parts of the newest snapshot tick seen so far, to acknowledge it once it is complete.
     partial: (u32, std::collections::HashSet<u8>),
     seq: u32,
@@ -429,7 +450,7 @@ impl Client {
         socket.connect(server)?;
         socket.set_nonblocking(true)?;
         socket.send(&Packet::Connect { name: name.to_string() }.encode())?;
-        Ok(Self { socket, client_id: None, last_tick: 0, ack: 0, snapshots: 0, entities: HashMap::new(), received_entities: 0, partial: (0, Default::default()), seq: 0, out: Outbox::default(), inbox: Inbox::default(), rpcs: Vec::new() })
+        Ok(Self { socket, client_id: None, last_tick: 0, ack: 0, snapshots: 0, entities: HashMap::new(), received_entities: 0, removed: Vec::new(), partial: (0, Default::default()), seq: 0, out: Outbox::default(), inbox: Inbox::default(), rpcs: Vec::new() })
     }
 
     /// Re-send the handshake (call periodically until [`Client::client_id`] is set).
@@ -461,13 +482,18 @@ impl Client {
                     self.rpcs.extend(self.inbox.accept(id, name, args));
                 }
                 Ok(Packet::RpcAck { id }) => self.out.ack(id),
-                Ok(Packet::Snapshot { tick, ack, part, parts, entities }) if tick >= self.last_tick => {
+                Ok(Packet::Snapshot { tick, ack, part, parts, entities, removed }) if tick >= self.last_tick => {
                     self.last_tick = tick;
                     self.ack = self.ack.max(ack);
                     self.snapshots += 1;
                     self.received_entities += entities.len() as u64;
                     for e in entities {
                         self.entities.insert(e.id, e);
+                    }
+                    for id in removed {
+                        if self.entities.remove(&id).is_some() {
+                            self.removed.push(id);
+                        }
                     }
                     if self.partial.0 != tick {
                         self.partial = (tick, Default::default());
@@ -491,6 +517,11 @@ impl Client {
         let data = self.out.push(name, args)?;
         let _ = self.socket.send(&data);
         Ok(())
+    }
+
+    /// Entities the server removed since the last call (so the game can despawn their objects).
+    pub fn take_removed(&mut self) -> Vec<u32> {
+        std::mem::take(&mut self.removed)
     }
 
     /// Calls the server made on this client since the last time.
@@ -521,7 +552,7 @@ mod tests {
             Packet::Connect { name: "Ünï".into() },
             Packet::Accepted { client_id: 7 },
             Packet::Input { seq: 9, movement: [1.0, -0.5], yaw: 90.0, pitch: -10.0, buttons: 3, dt: 0.016 },
-            Packet::Snapshot { tick: 4, ack: 2, part: 0, parts: 1, entities: vec![EntityState { id: 1, position: [1.0, 2.0, 3.0], rotation: [0.0, 0.0, 0.0, 1.0] }] },
+            Packet::Snapshot { tick: 4, ack: 2, part: 0, parts: 1, entities: vec![EntityState { id: 1, position: [1.0, 2.0, 3.0], rotation: [0.0, 0.0, 0.0, 1.0] }], removed: vec![5, 6] },
             Packet::Disconnect,
         ];
         for p in packets {
@@ -711,6 +742,34 @@ mod tests {
             client.snapshots > snaps
         }));
         assert_eq!(client.received_entities, before, "after the full tick was acknowledged nothing is resent");
+    }
+
+    #[test]
+    fn entities_that_disappear_are_announced_and_dropped_by_the_client() {
+        let mut server = Server::bind("127.0.0.1:0").unwrap();
+        let mut client = Client::connect(&server.local_addr().unwrap().to_string(), "c").unwrap();
+        assert!(wait(|| {
+            server.poll();
+            client.poll();
+            client.client_id.is_some()
+        }));
+        let at = |id: u32| EntityState { id, position: [id as f32, 0.0, 0.0], rotation: [0.0, 0.0, 0.0, 1.0] };
+        let world: Vec<EntityState> = (1..=3).map(at).collect();
+        server.broadcast(&world);
+        assert!(wait(|| {
+            client.poll();
+            client.entities.len() == 3
+        }));
+        std::thread::sleep(Duration::from_millis(30));
+        server.poll();
+        server.broadcast(&[at(1), at(3)]);
+        assert!(wait(|| {
+            client.poll();
+            client.entities.len() == 2
+        }));
+        assert!(!client.entities.contains_key(&2));
+        assert_eq!(client.take_removed(), vec![2]);
+        assert!(client.take_removed().is_empty());
     }
 
     #[test]

@@ -540,6 +540,12 @@ impl App {
                 interp.record(client);
                 apply_interpolated_players(&mut self.scene, interp, own);
                 props::reconcile(&mut self.scene, &client.entities, dt);
+                for id in client.take_removed() {
+                    let gone: Vec<_> = self.scene.iter_components::<sbox_net::replication::NetworkId>().filter(|(_, n)| n.0 == id).map(|(go, _)| go).collect();
+                    for go in gone {
+                        self.scene.destroy_object(go);
+                    }
+                }
             }
             None => {}
         }
