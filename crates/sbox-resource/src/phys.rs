@@ -97,7 +97,7 @@ pub struct PhysPart {
     pub bone: Option<String>,
 }
 
-/// A twist / swing joint between two parts (`m_joints[]`, `m_nType` 4). Frames are `(position, rotation [x, y, z, w])`
+/// A twist / swing (`m_nType` 4) or hinge (3) joint between two parts (`m_joints[]`). Frames are `(position, rotation [x, y, z, w])`
 /// in the space of each part.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PhysJoint {
@@ -110,6 +110,10 @@ pub struct PhysJoint {
     /// Twist range `[min, max]` in radians, if limited.
     pub twist: Option<[f32; 2]>,
     pub collide: bool,
+    /// `m_nType` 3: a hinge about the frames' X axis (wheels, lids) instead of a ball joint; `twist` is its angle range.
+    pub hinge: bool,
+    /// The angular motor, `(target speed about X in rad/s, largest torque)`; with a zero target it is friction.
+    pub motor: Option<(f32, f32)>,
 }
 
 /// Rotation (xyzw) of a row-major 3x4 rest-pose matrix (translation in the last column).
@@ -155,7 +159,7 @@ fn frame(v: &Value) -> Option<([f32; 3], [f32; 4])> {
     Some(([f(0)?, f(1)?, f(2)?], [f(4)?, f(5)?, f(6)?, f(7)?]))
 }
 
-/// Joints of a physics tree; types other than twist / swing are skipped.
+/// Joints of a physics tree; types other than twist / swing and hinge are skipped.
 pub fn joints(kv: &Value) -> Vec<PhysJoint> {
     let range = |j: &Value, key: &str, on: &str| -> Option<[f32; 2]> {
         if !j.get(on).and_then(Value::as_bool).unwrap_or(false) {
@@ -168,7 +172,7 @@ pub fn joints(kv: &Value) -> Vec<PhysJoint> {
         .and_then(Value::as_array)
         .unwrap_or(&[])
         .iter()
-        .filter(|j| j.get("m_nType").and_then(Value::as_i64) == Some(4))
+        .filter(|j| matches!(j.get("m_nType").and_then(Value::as_i64), Some(3 | 4)))
         .filter_map(|j| {
             Some(PhysJoint {
                 body1: j.get("m_nBody1")?.as_i64()? as usize,
@@ -178,6 +182,11 @@ pub fn joints(kv: &Value) -> Vec<PhysJoint> {
                 swing: range(j, "m_SwingLimit", "m_bEnableSwingLimit").map(|r| r[1]),
                 twist: range(j, "m_TwistLimit", "m_bEnableTwistLimit"),
                 collide: j.get("m_bEnableCollision").and_then(Value::as_bool).unwrap_or(false),
+                hinge: j.get("m_nType").and_then(Value::as_i64) == Some(3),
+                motor: j.get("m_bEnableAngularMotor").and_then(Value::as_bool).filter(|&on| on).and_then(|_| {
+                    let speed = j.get("m_vAngularTargetVelocity").and_then(Value::as_array).and_then(|a| a.first()).and_then(Value::as_f64).unwrap_or(0.0) as f32;
+                    Some((speed, j.get("m_flMaxTorque")?.as_f64()? as f32))
+                }),
             })
         })
         .collect()
@@ -286,8 +295,25 @@ mod tests {
         assert!((p[0].rotation[2] - h).abs() < 1e-5 && (p[0].rotation[3] - h).abs() < 1e-5, "90 degrees about Z, got {:?}", p[0].rotation);
         let j = joints(&kv);
         assert_eq!(j.len(), 1, "only the twist / swing joint is kept");
+        assert!(!j[0].hinge && j[0].motor.is_none());
         assert_eq!((j[0].body1, j[0].body2, j[0].swing, j[0].twist, j[0].collide), (0, 1, Some(0.5), None, false));
         assert_eq!(j[0].frame1, ([1.0, 2.0, 3.0], [0.0, 0.0, 0.0, 1.0]));
+    }
+
+    #[test]
+    fn hinge_joints_carry_their_limit_and_angular_motor() {
+        let frame = Value::Array([0., 0., 0., 1., 0., 0., 0., 1.].iter().map(|&x| d(x)).collect());
+        let hinge = obj(vec![
+            ("m_nType", Value::Int(3)), ("m_nBody1", Value::Int(0)), ("m_nBody2", Value::Int(1)),
+            ("m_Frame1", frame.clone()), ("m_Frame2", frame), ("m_bEnableCollision", Value::Bool(true)),
+            ("m_bEnableTwistLimit", Value::Bool(true)), ("m_TwistLimit", obj(vec![("m_flMin", d(-2.)), ("m_flMax", d(2.))])),
+            ("m_bEnableAngularMotor", Value::Bool(true)), ("m_vAngularTargetVelocity", v3(0.5, 0., 0.)), ("m_flMaxTorque", d(400.)),
+        ]);
+        let j = joints(&obj(vec![("m_joints", Value::Array(vec![hinge]))]));
+        assert_eq!(j.len(), 1);
+        assert!(j[0].hinge);
+        assert_eq!(j[0].twist, Some([-2.0, 2.0]));
+        assert_eq!(j[0].motor, Some((0.5, 400.0)));
     }
 
     #[test]

@@ -15,7 +15,7 @@ fn main() {
     let game = std::path::PathBuf::from(&a[1]);
     let mut fs = GameFs::from_game_dir(game.clone());
     fs.mount_map_packages(&game.join("core/maps"));
-    let data = fs.read(&a[2]).expect("model");
+    let data = std::fs::read(&a[2]).ok().or_else(|| fs.read(&a[2])).expect("model");
     let res = Resource::parse(&data).unwrap();
     let kv = kv3::parse(res.block_data("DATA").unwrap()).unwrap();
     let mut phys = res.block_data("PHYS").and_then(|b| kv3::parse(b).ok()).filter(|v| v.get("m_parts").and_then(Value::as_array).is_some_and(|p| !p.is_empty()));

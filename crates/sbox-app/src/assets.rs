@@ -83,8 +83,9 @@ pub fn spawn_ragdoll(scene: &mut Scene, root: &Transform, parts: &[sbox_resource
             swing_limit: j.swing,
             twist_limit: j.twist,
             collide: j.collide,
-            hinge: false,
-            drives: Vec::new(),
+            hinge: j.hinge,
+            // The angular motor holds the joint at its target speed up to the given torque: friction when the target is zero.
+            drives: j.motor.map(|(speed, torque)| sbox_physics::Drive { axis: sbox_physics::DriveAxis::Twist, mode: sbox_physics::DriveMode::Velocity { target: speed, factor: torque }, max_force: torque }).into_iter().collect(),
         };
         scene.add_component(owner, joint);
     }
@@ -798,7 +799,7 @@ mod tests {
         // middle part, so one of them hangs off a helper object.
         let part = |z: f32| PhysPart { shapes: vec![PhysShape::Capsule { a: [0.0, 0.0, -10.0], b: [0.0, 0.0, 10.0], radius: 5.0 }], position: [0.0, 0.0, z], rotation: [0.0, 0.0, 0.0, 1.0], mass: 5.0, bone: None };
         let frame = |z: f32| ([0.0, 0.0, z], [0.0, 0.0, 0.0, 1.0]);
-        let joint = |a: usize, b: usize| PhysJoint { body1: a, body2: b, frame1: frame(20.0), frame2: frame(-20.0), swing: Some(1.0), twist: Some([-0.5, 0.5]), collide: false };
+        let joint = |a: usize, b: usize| PhysJoint { body1: a, body2: b, frame1: frame(20.0), frame2: frame(-20.0), swing: Some(1.0), twist: Some([-0.5, 0.5]), collide: false, hinge: false, motor: None };
         let bodies = spawn_ragdoll(&mut scene, &Transform::from_position(Vec3::new(0.0, 0.0, 300.0)), &[part(0.0), part(40.0), part(80.0)], &[joint(1, 2), joint(1, 0)]);
         assert_eq!(bodies.len(), 3);
         assert_eq!(scene.iter_components::<sbox_physics::Joint>().count(), 2);
