@@ -834,6 +834,17 @@ impl ApplicationHandler for App {
             for _ in 0..(secs * 60.0) as u32 {
                 self.scene.tick(1.0 / 60.0);
             }
+            let flag = |name: &str| args.iter().position(|a| a == name).and_then(|j| args.get(j + 1)).and_then(|v| v.parse::<f32>().ok());
+            if let (Some(c), Some(yaw)) = (self.camera, flag("--cam-yaw")) {
+                // Swing the camera round the origin (where model viewers centre the model) and keep looking at it.
+                let t = self.scene.world_transform(c);
+                let r = (t.position.x * t.position.x + t.position.y * t.position.y).sqrt();
+                let rad = yaw.to_radians();
+                let mut n = t;
+                n.position = Vec3::new(-rad.cos() * r, -rad.sin() * r, t.position.z);
+                n.rotation = Angles::new(t.rotation.angles().pitch, yaw, 0.0).to_rotation();
+                self.scene.set_world_transform(c, n);
+            }
             if let (Some(c), Some(pitch)) = (self.camera, args.iter().position(|a| a == "--cam-pitch").and_then(|j| args.get(j + 1)).and_then(|v| v.parse::<f32>().ok())) {
                 let mut t = self.scene.world_transform(c);
                 let a = t.rotation.angles();
