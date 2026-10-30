@@ -797,6 +797,13 @@ impl ApplicationHandler for App {
         if let Some(cam) = self.camera {
             self.world_panel = Self::build_world_panel(&mut self.scene, &mut renderer, cam, &args);
         }
+        // `--sky <material.vmat_c> --game <dir>` installs that sky cubemap; `--cubefog` also adds a CubemapFog to the camera.
+        if let (Some(sky), Some(game)) = (args.iter().position(|a| a == "--sky").and_then(|i| args.get(i + 1)), args.iter().position(|a| a == "--game").and_then(|i| args.get(i + 1))) {
+            Assets::new(Some(sbox_resource::vmat::GameFs::from_game_dir(std::path::PathBuf::from(game)))).load_sky(&mut renderer, sky, [1.0; 4]);
+            if let (Some(cam), true) = (self.camera, args.iter().any(|a| a == "--cubefog")) {
+                self.scene.add_component(cam, sbox_scene::CubemapFog::default());
+            }
+        }
         // `--ssr` turns on screen-space reflections without needing a scene file that has the component.
         if args.iter().any(|a| a == "--ssr") {
             if let Some(cam) = self.camera {
