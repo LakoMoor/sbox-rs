@@ -188,7 +188,19 @@ fn ssr(px: vec2<i32>, dims: vec2<f32>) -> vec4<f32> {
                 let hq = p + r * hi;
                 let hu = vec2<f32>(hq.x / (hq.z * post.cam.z * post.cam.w) * 0.5 + 0.5, 0.5 - hq.y / (hq.z * post.cam.z) * 0.5);
                 let hpx = vec2<i32>(clamp(hu, vec2<f32>(0.0), vec2<f32>(0.9999)) * dims);
-                let col = textureLoad(hdr_tex, hpx, 0).rgb;
+                // Rough surfaces blur the reflection: a small ring of taps whose radius grows with roughness and with
+                // how far the ray travelled.
+                let blur_px = g.b * 2.0 * 10.0 * (0.2 + hi / max_len);
+                let lim = vec2<i32>(dims) - vec2<i32>(1);
+                var col = textureLoad(hdr_tex, hpx, 0).rgb;
+                if (blur_px > 0.75) {
+                    let o = vec2<i32>(vec2<f32>(blur_px));
+                    col = col * 0.2
+                        + textureLoad(hdr_tex, clamp(hpx + vec2<i32>(o.x, o.y), vec2<i32>(0), lim), 0).rgb * 0.2
+                        + textureLoad(hdr_tex, clamp(hpx + vec2<i32>(-o.x, o.y), vec2<i32>(0), lim), 0).rgb * 0.2
+                        + textureLoad(hdr_tex, clamp(hpx + vec2<i32>(o.x, -o.y), vec2<i32>(0), lim), 0).rgb * 0.2
+                        + textureLoad(hdr_tex, clamp(hpx + vec2<i32>(-o.x, -o.y), vec2<i32>(0), lim), 0).rgb * 0.2;
+                }
                 // Fresnel with the metalness stored in the G-buffer, fading with roughness, screen edges and ray length.
                 let metal = (g.a - 0.25) / 0.75;
                 let f0 = mix(0.04, 0.9, clamp(metal, 0.0, 1.0));
@@ -205,6 +217,16 @@ fn ssr(px: vec2<i32>, dims: vec2<f32>) -> vec4<f32> {
         if (t > max_len) {
             break;
         }
+    }
+    // Nothing on screen was hit: fall back to the sky cubemap (when the scene has one) in the mirror direction, weighted
+    // like a hit but without the edge and distance fades.
+    if (post.cube_tint.w > 0.0) {
+        let metal = (g.a - 0.25) / 0.75;
+        let f0 = mix(0.04, 0.9, clamp(metal, 0.0, 1.0));
+        let fres = f0 + (1.0 - f0) * pow(1.0 - clamp(dot(-v, n), 0.0, 1.0), 5.0);
+        let dir = post.cam_right.xyz * r.x + post.cam_up.xyz * r.y + post.cam_fwd.xyz * r.z;
+        let sky = textureSampleLevel(sky_cube, hdr_samp, normalize(dir), g.b * 2.0 * 6.0).rgb * post.cube_tint.rgb * post.cube_tint.w;
+        return vec4<f32>(sky, fres * (1.0 - g.b * 2.0));
     }
     return vec4<f32>(0.0);
 }
