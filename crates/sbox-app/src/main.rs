@@ -159,8 +159,13 @@ impl App {
         let ground = r.upload_mesh(&MeshData::plane(2000.0));
         let ball = r.upload_mesh(&MeshData::sphere(32.0, 32, 16));
 
+        // With `--ssr` the demo uses glossy materials (the default roughness is far above the reflection cutoff).
+        let glossy = std::env::args().any(|a| a == "--ssr").then(|| r.create_material_ex(&sbox_render::MaterialDesc { roughness: 0.12, ..Default::default() }));
         let g = scene.create_object("ground");
         let mut m = ModelRenderer::new(ground);
+        if let Some(mat) = glossy {
+            m.material = mat;
+        }
         m.tint = [0.35, 0.4, 0.35, 1.0];
         scene.add_component(g, m);
 
@@ -168,6 +173,9 @@ impl App {
             let go = scene.create_object(&format!("cube{i}"));
             scene.set_local_transform(go, Transform::from_position(Vec3::new(300.0, (i as f32 - 2.0) * 120.0, 40.0)));
             let mut m = ModelRenderer::new(if i % 2 == 0 { cube } else { ball });
+            if let Some(mat) = glossy {
+                m.material = mat;
+            }
             m.tint = [0.3 + 0.15 * i as f32, 0.8 - 0.12 * i as f32, 0.5, 1.0];
             scene.add_component(go, m);
             scene.add_component(go, Spinner { speed: 30.0 + 20.0 * i as f32 });
@@ -578,6 +586,12 @@ impl ApplicationHandler for App {
         let args: Vec<String> = std::env::args().skip(1).collect();
         let model = args.iter().find(|a| !a.starts_with("--") && a.ends_with(".vmdl_c")).cloned();
         self.camera = Some(Self::build_scene(&mut self.scene, &mut renderer, model.as_deref(), args.iter().position(|a| a == "--anim").and_then(|i| args.get(i + 1)).map(String::as_str), args.iter().position(|a| a == "--scene").and_then(|i| args.get(i + 1)).map(String::as_str)));
+        // `--ssr` turns on screen-space reflections without needing a scene file that has the component.
+        if args.iter().any(|a| a == "--ssr") {
+            if let Some(cam) = self.camera {
+                self.scene.add_component(cam, sbox_scene::ScreenSpaceReflections::default());
+            }
+        }
         self.net = Self::start_net(&mut self.scene, &args);
         if let Some((ui, font, page)) = Self::build_ui(&mut renderer, &args) {
             self.ui = Some(ui);

@@ -440,6 +440,10 @@ impl ComponentLoader for SceneLoader<'_> {
                 true
             }
             "EnvmapProbe" => true,
+            "ScreenSpaceReflections" => {
+                scene.add_component(go, sbox_scene::ScreenSpaceReflections::default());
+                true
+            }
             "ScreenPanel" => {
                 let f = |k: &str, d: f64| p.get(k).and_then(Value::as_f64).unwrap_or(d) as f32;
                 scene.add_component(go, sbox_scene::ScreenPanel { opacity: f("Opacity", 1.0), scale: f("Scale", 1.0).max(0.001), z_index: f("ZIndex", 100.0) as i32 });

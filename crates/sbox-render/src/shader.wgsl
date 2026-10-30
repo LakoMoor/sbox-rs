@@ -161,8 +161,24 @@ fn aces(x: vec3<f32>) -> vec3<f32> {
     return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
+struct FsOut {
+    @location(0) color: vec4<f32>,
+    // World normal (octahedral) in rg, roughness in b, 0.25 + 0.75 * metalness in a; a = 0 where nothing opaque was drawn.
+    @location(1) gbuf: vec4<f32>,
+};
+
+fn oct_encode(n: vec3<f32>) -> vec2<f32> {
+    let a = n / (abs(n.x) + abs(n.y) + abs(n.z));
+    var e = a.xy;
+    if (a.z < 0.0) {
+        e = (vec2<f32>(1.0) - abs(a.yx)) * select(vec2<f32>(-1.0), vec2<f32>(1.0), a.xy >= vec2<f32>(0.0));
+    }
+    return e * 0.5 + 0.5;
+}
+
 @fragment
-fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+fn fs_main(in: VsOut) -> FsOut {
+    var out: FsOut;
     let geo_n = normalize(in.normal);
     let uv = in.uv * mat.uv_scale.xy;
     let flags = u32(mat.pbr.w + 0.5);
@@ -205,12 +221,16 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         }
         color += shade(n, v, l_dir, g.point_color[i].rgb * att * att * cone, albedo, rough, metal);
     }
+    out.gbuf = vec4<f32>(oct_encode(n), rough, 0.25 + 0.75 * metal);
     if ((flags & 4u) != 0u) {
-        return vec4<f32>(albedo, obj.tint.a * albedo4.a);
+        out.color = vec4<f32>(albedo, obj.tint.a * albedo4.a);
+        out.gbuf = vec4<f32>(0.0);
+        return out;
     }
     var alpha = obj.tint.a;
     if ((flags & 16u) != 0u) {
         alpha = alpha * mat.tint.a * albedo4.a;
     }
-    return vec4<f32>(color, alpha);
+    out.color = vec4<f32>(color, alpha);
+    return out;
 }

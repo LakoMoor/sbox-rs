@@ -3,7 +3,7 @@ use anyhow::{anyhow, Result};
 use bytemuck::{Pod, Zeroable};
 use sbox_math::{sbox_to_view, Mat4, RotationExt, Transform, Vec3};
 use sbox_resource::vtex::{TexFormat, Texture};
-use sbox_scene::{CubemapFog, FogVolume, GradientFog, AmbientOcclusion, ChromaticAberration, DepthOfField, Sharpen, TonemapMode, Tonemapping, Bloom, Vignette, CameraComponent, DirectionalLight, MaterialId, MeshId, ModelRenderer, PointLight, Scene, SpotLight};
+use sbox_scene::{ScreenSpaceReflections, CubemapFog, FogVolume, GradientFog, AmbientOcclusion, ChromaticAberration, DepthOfField, Sharpen, TonemapMode, Tonemapping, Bloom, Vignette, CameraComponent, DirectionalLight, MaterialId, MeshId, ModelRenderer, PointLight, Scene, SpotLight};
 use wgpu::util::DeviceExt;
 
 const MAX_POINT_LIGHTS: usize = 8;
@@ -11,6 +11,8 @@ const MAX_BONES: usize = 32768;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 /// The scene is rendered in linear HDR and tone mapped by the post pass.
 const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+/// Normals, roughness and metalness of the opaque surfaces of the frame, for screen-space effects.
+const GBUFFER_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const SHADOW_SIZE: u32 = 2048;
 /// Half-extent (world units) of the directional shadow volume centred on the camera.
 const SHADOW_RADIUS: f32 = 1800.0;
@@ -101,6 +103,7 @@ struct PostUniform {
     vol_max: [[f32; 4]; 4],
     cube_fog: [f32; 4],  // start, end (0 = off), falloff exponent, blur
     cube_tint: [f32; 4], // rgb tint, sky exposure
+    ssr: [f32; 4],       // x = max distance (0 = off), y = intensity
 }
 
 /// A textured screen-space rectangle drawn over the finished frame (`rect` = x, y, width, height in pixels, origin top-left).
@@ -117,6 +120,7 @@ pub struct UiRect {
 struct HdrTarget {
     size: (u32, u32),
     view: wgpu::TextureView,
+    gbuffer: wgpu::TextureView,
 }
 
 struct GpuMaterial {
@@ -431,7 +435,9 @@ impl Renderer {
                         wgpu::BlendState::REPLACE
                     }),
                     write_mask: wgpu::ColorWrites::ALL,
-                })],
+                }),
+                // Only opaque surfaces describe themselves to the G-buffer.
+                Some(wgpu::ColorTargetState { format: GBUFFER_FORMAT, blend: None, write_mask: if alpha { wgpu::ColorWrites::empty() } else { wgpu::ColorWrites::ALL } })],
             }),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
@@ -720,7 +726,7 @@ impl Renderer {
                 module: &shader,
                 entry_point: Some("fs_main"),
                 compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState { format: HDR_FORMAT, blend: None, write_mask: wgpu::ColorWrites::ALL })],
+                targets: &[Some(wgpu::ColorTargetState { format: HDR_FORMAT, blend: None, write_mask: wgpu::ColorWrites::ALL }), Some(wgpu::ColorTargetState { format: GBUFFER_FORMAT, blend: None, write_mask: wgpu::ColorWrites::empty() })],
             }),
             primitive: Default::default(),
             depth_stencil: Some(wgpu::DepthStencilState {
@@ -845,6 +851,12 @@ impl Renderer {
                     ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::Cube, multisampled: false },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
+                    count: None,
+                },
             ],
         });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("post"), source: wgpu::ShaderSource::Wgsl(include_str!("post.wgsl").into()) });
@@ -927,7 +939,20 @@ impl Renderer {
             view_formats: &[],
         });
         let view = tex.create_view(&Default::default());
-        self.hdr = Some(HdrTarget { size, view });
+        let gbuffer = self
+            .device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("gbuffer"),
+                size: wgpu::Extent3d { width: size.0, height: size.1, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: GBUFFER_FORMAT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+            .create_view(&Default::default());
+        self.hdr = Some(HdrTarget { size, view, gbuffer });
     }
 
     pub fn resize(&mut self, w: u32, h: u32) {
@@ -1190,6 +1215,11 @@ impl Renderer {
                         }),
                         store: wgpu::StoreOp::Store,
                     },
+                }),
+                Some(wgpu::RenderPassColorAttachment {
+                    view: &self.hdr.as_ref().unwrap().gbuffer,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: depth,
@@ -1246,6 +1276,7 @@ impl Renderer {
             }
             let cfog = self.sky.as_ref().and_then(|sky| scene.iter_components::<CubemapFog>().next().map(|(_, f)| (sky.exposure, sky.tint, f)));
             let ao = scene.iter_components::<AmbientOcclusion>().next().map(|(_, a)| a);
+            let ssr = scene.iter_components::<ScreenSpaceReflections>().next().map_or([0.0; 4], |(_, r)| [r.max_distance.max(1.0), r.intensity, 0.0, 0.0]);
             let dof = scene.iter_components::<DepthOfField>().next().map(|(_, d)| d);
             let sharpen = scene.iter_components::<Sharpen>().next().map_or(0.0, |(_, s)| s.scale);
             let post = PostUniform {
@@ -1270,6 +1301,7 @@ impl Renderer {
                 cam_up: (cam_rot * Vec3::Z).extend(0.0).to_array(),
                 cam_fwd: (cam_rot * Vec3::X).extend(0.0).to_array(),
                 tm: tm.map_or([0.0; 4], |t| [t.auto_exposure as u32 as f32, t.min_exposure, t.max_exposure, 0.0]),
+                ssr,
                 ao: ao.map_or([0.0, 0.0, ca[0], ca[1]], |a| [a.radius, a.intensity, ca[0], ca[1]]),
             };
             self.queue.write_buffer(&self.post_buf, 0, bytemuck::bytes_of(&post));
@@ -1315,6 +1347,7 @@ impl Renderer {
                     wgpu::BindGroupEntry { binding: 2, resource: self.post_buf.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(depth) },
                     wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(self.sky_view.as_ref().unwrap_or(&self.dummy_cube)) },
+                    wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.hdr.as_ref().unwrap().gbuffer) },
                 ],
             });
             pass.set_bind_group(0, &post_bg, &[]);

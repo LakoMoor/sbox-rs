@@ -26,6 +26,7 @@ struct Post {
     vol_max: array<vec4<f32>, 4>,
     cube_fog: vec4<f32>,  // start, end (0 = off), falloff exponent, blur
     cube_tint: vec4<f32>, // rgb tint, sky exposure
+    ssr: vec4<f32>,       // x = max ray length in world units (0 = off), y = intensity
 };
 
 @group(0) @binding(0) var hdr_tex: texture_2d<f32>;
@@ -33,6 +34,7 @@ struct Post {
 @group(0) @binding(2) var<uniform> post: Post;
 @group(0) @binding(3) var depth_tex: texture_depth_2d;
 @group(0) @binding(4) var sky_cube: texture_cube<f32>;
+@group(0) @binding(5) var gbuffer_tex: texture_2d<f32>;
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
@@ -126,6 +128,87 @@ fn ssao(px: vec2<i32>, dims: vec2<f32>) -> f32 {
     return 1.0 - clamp(occ / 12.0 * 2.0 * post.ao.y, 0.0, 1.0);
 }
 
+fn oct_decode(e: vec2<f32>) -> vec3<f32> {
+    let f = e * 2.0 - 1.0;
+    var n = vec3<f32>(f.x, f.y, 1.0 - abs(f.x) - abs(f.y));
+    if (n.z < 0.0) {
+        let xy = (vec2<f32>(1.0) - abs(n.yx)) * select(vec2<f32>(-1.0), vec2<f32>(1.0), n.xy >= vec2<f32>(0.0));
+        n = vec3<f32>(xy, n.z);
+    }
+    return normalize(n);
+}
+
+// Screen-space reflection: marches the mirror direction through view space until it passes behind the depth buffer, and
+// returns the colour found there with its weight in w (0 when the ray leaves the screen, hits nothing, or the surface
+// is too rough, which matches the reference's roughness cutoff of 0.5).
+fn ssr(px: vec2<i32>, dims: vec2<f32>) -> vec4<f32> {
+    let g = textureLoad(gbuffer_tex, px, 0);
+    if (g.a <= 0.0 || g.b >= 0.5) {
+        return vec4<f32>(0.0);
+    }
+    let p = view_pos(px, dims);
+    let nw = oct_decode(g.rg);
+    let n = vec3<f32>(dot(nw, post.cam_right.xyz), dot(nw, post.cam_up.xyz), dot(nw, post.cam_fwd.xyz));
+    let v = normalize(p);
+    let r = reflect(v, n);
+    // Rays heading back at the camera cannot hit anything the depth buffer shows.
+    if (r.z < 0.05) {
+        return vec4<f32>(0.0);
+    }
+    let steps = 48u;
+    let max_len = post.ssr.x;
+    var t = max_len / f32(steps) * 0.25;
+    var prev_t = 0.0;
+    for (var i = 0u; i < steps; i = i + 1u) {
+        let q = p + r * t;
+        if (q.z <= post.cam.x) {
+            break;
+        }
+        let ndc = vec2<f32>(q.x / (q.z * post.cam.z * post.cam.w), q.y / (q.z * post.cam.z));
+        let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+        if (uv.x < 0.0 || uv.x >= 1.0 || uv.y < 0.0 || uv.y >= 1.0) {
+            break;
+        }
+        let hp = vec2<i32>(uv * dims);
+        let d = textureLoad(depth_tex, hp, 0);
+        if (d < 0.99999) {
+            let scene_z = view_distance(d);
+            // Behind the surface by less than a thickness proportional to the distance: a hit. Refine between the
+            // last two samples to land on the edge.
+            if (q.z > scene_z && q.z - scene_z < max(q.z * 0.05, 8.0)) {
+                var lo = prev_t;
+                var hi = t;
+                for (var k = 0u; k < 5u; k = k + 1u) {
+                    let mid = (lo + hi) * 0.5;
+                    let m = p + r * mid;
+                    let mu = vec2<f32>(m.x / (m.z * post.cam.z * post.cam.w) * 0.5 + 0.5, 0.5 - m.y / (m.z * post.cam.z) * 0.5);
+                    let mz = view_distance(textureLoad(depth_tex, vec2<i32>(clamp(mu, vec2<f32>(0.0), vec2<f32>(0.9999)) * dims), 0));
+                    if (m.z > mz) { hi = mid; } else { lo = mid; }
+                }
+                let hq = p + r * hi;
+                let hu = vec2<f32>(hq.x / (hq.z * post.cam.z * post.cam.w) * 0.5 + 0.5, 0.5 - hq.y / (hq.z * post.cam.z) * 0.5);
+                let hpx = vec2<i32>(clamp(hu, vec2<f32>(0.0), vec2<f32>(0.9999)) * dims);
+                let col = textureLoad(hdr_tex, hpx, 0).rgb;
+                // Fresnel with the metalness stored in the G-buffer, fading with roughness, screen edges and ray length.
+                let metal = (g.a - 0.25) / 0.75;
+                let f0 = mix(0.04, 0.9, clamp(metal, 0.0, 1.0));
+                let fres = f0 + (1.0 - f0) * pow(1.0 - clamp(dot(-v, n), 0.0, 1.0), 5.0);
+                let edge = clamp(min(min(hu.x, 1.0 - hu.x), min(hu.y, 1.0 - hu.y)) * 8.0, 0.0, 1.0);
+                let rough = 1.0 - g.b * 2.0;
+                let dist = 1.0 - clamp(hi / max_len, 0.0, 1.0);
+                return vec4<f32>(col, fres * edge * rough * dist);
+            }
+        }
+        prev_t = t;
+        // Steps grow with distance: fine near the surface, coarse far away.
+        t = t + max_len / f32(steps) * (0.25 + f32(i) * 0.1);
+        if (t > max_len) {
+            break;
+        }
+    }
+    return vec4<f32>(0.0);
+}
+
 // Circle of confusion in 0..1 for a depth buffer value.
 fn coc_of(d: f32) -> f32 {
     let dist = view_distance(d);
@@ -145,6 +228,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     var c = textureSampleLevel(hdr_tex, hdr_samp, in.uv, 0.0).rgb;
     if (post.ao.x > 0.0) {
         c = c * ssao(vec2<i32>(in.pos.xy), vec2<f32>(textureDimensions(hdr_tex)));
+    }
+    if (post.ssr.x > 0.0) {
+        let r = ssr(vec2<i32>(in.pos.xy), vec2<f32>(textureDimensions(hdr_tex)));
+        c = c + r.rgb * r.w * post.ssr.y;
     }
     if (post.fog.y > 0.0) {
         let dims = vec2<f32>(textureDimensions(hdr_tex));

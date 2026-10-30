@@ -240,6 +240,23 @@ impl Component for DepthOfField {
     impl_component_any!();
 }
 
+/// Screen-space reflections: opaque surfaces reflect what is visible on screen, traced against the depth buffer with the
+/// normals and roughness the scene pass writes into its G-buffer. `max_distance` is the longest ray in world units.
+pub struct ScreenSpaceReflections {
+    pub max_distance: f32,
+    pub intensity: f32,
+}
+
+impl Default for ScreenSpaceReflections {
+    fn default() -> Self {
+        Self { max_distance: 2048.0, intensity: 1.0 }
+    }
+}
+
+impl Component for ScreenSpaceReflections {
+    impl_component_any!();
+}
+
 /// Screen-space ambient occlusion computed from the depth buffer.
 pub struct AmbientOcclusion {
     /// World-space sampling radius.
