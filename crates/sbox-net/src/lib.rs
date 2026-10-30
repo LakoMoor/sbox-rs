@@ -13,7 +13,7 @@ const MAX_PACKET: usize = 1400;
 const ENTITY_BYTES: usize = 32;
 
 /// State of one networked object in a snapshot.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EntityState {
     pub id: u32,
     pub position: [f32; 3],
@@ -28,8 +28,12 @@ pub enum Packet {
     /// Per-tick client input: movement axes in -1..1, look angles in degrees and a button bit set.
     /// `dt` is the client frame time the movement was held for; the server integrates it exactly once.
     Input { seq: u32, movement: [f32; 2], yaw: f32, pitch: f32, buttons: u32, dt: f32 },
-    /// `ack` is the last input of the receiving client that the server has applied.
-    Snapshot { tick: u32, ack: u32, entities: Vec<EntityState> },
+    /// `ack` is the last input of the receiving client that the server has applied. A tick's entities may span several
+    /// packets (`part` of `parts`); they hold only what changed since the last tick the client acknowledged
+    /// ([`Packet::SnapshotAck`]), the client keeps the rest as it was.
+    Snapshot { tick: u32, ack: u32, part: u8, parts: u8, entities: Vec<EntityState> },
+    /// The client has received every packet of the snapshot of this tick.
+    SnapshotAck { tick: u32 },
     Disconnect,
     /// Reliable remote call: delivered at least once by retransmission, executed once (the receiver drops duplicates).
     Rpc { id: u32, name: String, args: Vec<u8> },
@@ -94,10 +98,12 @@ impl Packet {
                 }
                 w.u32(*buttons);
             }
-            Packet::Snapshot { tick, ack, entities } => {
+            Packet::Snapshot { tick, ack, part, parts, entities } => {
                 w.0.push(4);
                 w.u32(*tick);
                 w.u32(*ack);
+                w.0.push(*part);
+                w.0.push(*parts);
                 w.u32(entities.len() as u32);
                 for e in entities {
                     w.u32(e.id);
@@ -118,6 +124,10 @@ impl Packet {
             Packet::RpcAck { id } => {
                 w.0.push(7);
                 w.u32(*id);
+            }
+            Packet::SnapshotAck { tick } => {
+                w.0.push(8);
+                w.u32(*tick);
             }
         }
         w.0
@@ -142,6 +152,7 @@ impl Packet {
             4 => {
                 let tick = r.u32()?;
                 let ack = r.u32()?;
+                let (part, parts) = (r.u8()?, r.u8()?);
                 let n = r.u32()? as usize;
                 // Reject counts the packet cannot hold before allocating.
                 if n > MAX_PACKET / ENTITY_BYTES {
@@ -151,7 +162,7 @@ impl Packet {
                 for _ in 0..n {
                     entities.push(EntityState { id: r.u32()?, position: [r.f32()?, r.f32()?, r.f32()?], rotation: [r.f32()?, r.f32()?, r.f32()?, r.f32()?] });
                 }
-                Packet::Snapshot { tick, ack, entities }
+                Packet::Snapshot { tick, ack, part, parts, entities }
             }
             5 => Packet::Disconnect,
             6 => {
@@ -162,6 +173,7 @@ impl Packet {
                 Packet::Rpc { id, name, args: r.take(len)?.to_vec() }
             }
             7 => Packet::RpcAck { id: r.u32()? },
+            8 => Packet::SnapshotAck { tick: r.u32()? },
             t => bail!("unknown packet type {t}"),
         })
     }
@@ -253,15 +265,22 @@ pub struct Server {
     reliable: HashMap<u32, (Outbox, Inbox)>,
     /// Last input number applied per client, echoed in snapshots.
     acked: HashMap<u32, u32>,
+    /// Newest tick each client has fully received; snapshots to it only carry what changed since then.
+    baseline: HashMap<u32, u32>,
+    /// Full world states of the last ticks, the bases deltas are computed against.
+    history: std::collections::VecDeque<(u32, HashMap<u32, EntityState>)>,
     next_id: u32,
     pub tick: u32,
 }
+
+/// How many past ticks the server remembers; a client whose acknowledged tick fell out of it gets the full state.
+const HISTORY_TICKS: usize = 64;
 
 impl Server {
     pub fn bind(addr: &str) -> Result<Self> {
         let socket = UdpSocket::bind(addr)?;
         socket.set_nonblocking(true)?;
-        Ok(Self { socket, clients: HashMap::new(), reliable: HashMap::new(), acked: HashMap::new(), next_id: 1, tick: 0 })
+        Ok(Self { socket, clients: HashMap::new(), reliable: HashMap::new(), acked: HashMap::new(), baseline: HashMap::new(), history: Default::default(), next_id: 1, tick: 0 })
     }
 
     pub fn local_addr(&self) -> Result<SocketAddr> {
@@ -302,10 +321,20 @@ impl Server {
                         events.push(ServerEvent::Input { client_id, seq, movement, yaw, pitch, buttons, dt });
                     }
                 }
+                Packet::SnapshotAck { tick } => {
+                    if let Some(&client_id) = self.clients.get(&from) {
+                        // Only ticks the server really sent count; the baseline never moves backwards.
+                        if self.history.iter().any(|(t, _)| *t == tick) {
+                            let b = self.baseline.entry(client_id).or_default();
+                            *b = (*b).max(tick);
+                        }
+                    }
+                }
                 Packet::Disconnect => {
                     if let Some(client_id) = self.clients.remove(&from) {
                         self.reliable.remove(&client_id);
                         self.acked.remove(&client_id);
+                        self.baseline.remove(&client_id);
                         events.push(ServerEvent::Disconnected { client_id });
                     }
                 }
@@ -350,15 +379,24 @@ impl Server {
         Ok(())
     }
 
-    /// Send the world state to every client, split into packets that fit the MTU. Advances the tick.
+    /// Send the world state to every client as the entities that changed since the tick that client last acknowledged
+    /// (all of them for a new client), split into packets that fit the MTU. Advances the tick. A lost packet is repaired
+    /// by itself: the client does not acknowledge the tick, so the changes stay in the next delta.
     pub fn broadcast(&mut self, entities: &[EntityState]) {
         self.tick += 1;
+        self.history.push_back((self.tick, entities.iter().map(|e| (e.id, *e)).collect()));
+        while self.history.len() > HISTORY_TICKS {
+            self.history.pop_front();
+        }
         let per_packet = MAX_PACKET / ENTITY_BYTES - 1;
-        let chunks: Vec<&[EntityState]> = if entities.is_empty() { vec![&[]] } else { entities.chunks(per_packet).collect() };
-        for chunk in chunks {
-            for (addr, id) in &self.clients {
-                let ack = self.acked.get(id).copied().unwrap_or(0);
-                let data = Packet::Snapshot { tick: self.tick, ack, entities: chunk.to_vec() }.encode();
+        for (addr, id) in &self.clients {
+            let base = self.baseline.get(id).and_then(|t| self.history.iter().find(|(h, _)| h == t)).map(|(_, m)| m);
+            let changed: Vec<EntityState> = entities.iter().filter(|e| base.map_or(true, |b| b.get(&e.id) != Some(*e))).copied().collect();
+            let ack = self.acked.get(id).copied().unwrap_or(0);
+            let chunks: Vec<&[EntityState]> = if changed.is_empty() { vec![&[]] } else { changed.chunks(per_packet).collect() };
+            let parts = chunks.len().min(255) as u8;
+            for (i, chunk) in chunks.into_iter().take(255).enumerate() {
+                let data = Packet::Snapshot { tick: self.tick, ack, part: i as u8, parts, entities: chunk.to_vec() }.encode();
                 let _ = self.socket.send_to(&data, addr);
             }
         }
@@ -375,6 +413,10 @@ pub struct Client {
     pub snapshots: u32,
     /// Latest known state of every entity, by id.
     pub entities: HashMap<u32, EntityState>,
+    /// Entities received in snapshot packets so far (deltas make this much smaller than snapshots x entities).
+    pub received_entities: u64,
+    /// Parts of the newest snapshot tick seen so far, to acknowledge it once it is complete.
+    partial: (u32, std::collections::HashSet<u8>),
     seq: u32,
     out: Outbox,
     inbox: Inbox,
@@ -387,7 +429,7 @@ impl Client {
         socket.connect(server)?;
         socket.set_nonblocking(true)?;
         socket.send(&Packet::Connect { name: name.to_string() }.encode())?;
-        Ok(Self { socket, client_id: None, last_tick: 0, ack: 0, snapshots: 0, entities: HashMap::new(), seq: 0, out: Outbox::default(), inbox: Inbox::default(), rpcs: Vec::new() })
+        Ok(Self { socket, client_id: None, last_tick: 0, ack: 0, snapshots: 0, entities: HashMap::new(), received_entities: 0, partial: (0, Default::default()), seq: 0, out: Outbox::default(), inbox: Inbox::default(), rpcs: Vec::new() })
     }
 
     /// Re-send the handshake (call periodically until [`Client::client_id`] is set).
@@ -419,12 +461,21 @@ impl Client {
                     self.rpcs.extend(self.inbox.accept(id, name, args));
                 }
                 Ok(Packet::RpcAck { id }) => self.out.ack(id),
-                Ok(Packet::Snapshot { tick, ack, entities }) if tick >= self.last_tick => {
+                Ok(Packet::Snapshot { tick, ack, part, parts, entities }) if tick >= self.last_tick => {
                     self.last_tick = tick;
                     self.ack = self.ack.max(ack);
                     self.snapshots += 1;
+                    self.received_entities += entities.len() as u64;
                     for e in entities {
                         self.entities.insert(e.id, e);
+                    }
+                    if self.partial.0 != tick {
+                        self.partial = (tick, Default::default());
+                    }
+                    self.partial.1.insert(part);
+                    // Acknowledge the tick once every part of it has arrived (repeats of the last part re-acknowledge).
+                    if self.partial.1.len() >= parts as usize {
+                        let _ = self.socket.send(&Packet::SnapshotAck { tick }.encode());
                     }
                 }
                 _ => {}
@@ -470,7 +521,7 @@ mod tests {
             Packet::Connect { name: "Ünï".into() },
             Packet::Accepted { client_id: 7 },
             Packet::Input { seq: 9, movement: [1.0, -0.5], yaw: 90.0, pitch: -10.0, buttons: 3, dt: 0.016 },
-            Packet::Snapshot { tick: 4, ack: 2, entities: vec![EntityState { id: 1, position: [1.0, 2.0, 3.0], rotation: [0.0, 0.0, 0.0, 1.0] }] },
+            Packet::Snapshot { tick: 4, ack: 2, part: 0, parts: 1, entities: vec![EntityState { id: 1, position: [1.0, 2.0, 3.0], rotation: [0.0, 0.0, 0.0, 1.0] }] },
             Packet::Disconnect,
         ];
         for p in packets {
@@ -583,6 +634,83 @@ mod tests {
         assert!(inbox.accept(5 + RPC_WINDOW, "x".into(), vec![]).is_empty());
         assert!(inbox.held.is_empty());
         assert!(inbox.acceptable(4), "already delivered ids are still acknowledged");
+    }
+
+    #[test]
+    fn snapshots_carry_only_what_changed_since_the_acknowledged_tick() {
+        let mut server = Server::bind("127.0.0.1:0").unwrap();
+        let mut client = Client::connect(&server.local_addr().unwrap().to_string(), "c").unwrap();
+        assert!(wait(|| {
+            server.poll();
+            client.poll();
+            client.client_id.is_some()
+        }));
+        let at = |id: u32, x: f32| EntityState { id, position: [x, 0.0, 0.0], rotation: [0.0, 0.0, 0.0, 1.0] };
+        let mut world = vec![at(1, 0.0), at(2, 0.0), at(3, 0.0)];
+        // Receive one broadcast and let the acknowledgement reach the server.
+        let mut exchange = |server: &mut Server, client: &mut Client, world: &[EntityState]| -> u64 {
+            let before = (client.received_entities, client.snapshots);
+            server.broadcast(world);
+            assert!(wait(|| {
+                client.poll();
+                client.snapshots > before.1
+            }));
+            // The client's SnapshotAck is read by the server's next poll.
+            std::thread::sleep(Duration::from_millis(30));
+            server.poll();
+            client.received_entities - before.0
+        };
+        assert_eq!(exchange(&mut server, &mut client, &world), 3, "a new client gets everything");
+        assert_eq!(exchange(&mut server, &mut client, &world), 0, "nothing changed");
+        world[1] = at(2, 5.0);
+        assert_eq!(exchange(&mut server, &mut client, &world), 1, "only the moved entity");
+        assert_eq!(client.entities[&2].position[0], 5.0);
+        assert_eq!(client.entities[&1].position[0], 0.0, "unchanged ones stay as they were");
+        // A tick the client never acknowledged keeps its changes in the next delta: drop the acks by not polling the server.
+        world[0] = at(1, 9.0);
+        let before = client.received_entities;
+        server.broadcast(&world);
+        assert!(wait(|| {
+            client.poll();
+            client.received_entities > before
+        }));
+        // (the server has not read that ack yet) a second broadcast must still contain entity 1
+        let before = client.received_entities;
+        server.broadcast(&world);
+        assert!(wait(|| {
+            client.poll();
+            client.received_entities > before
+        }));
+        assert_eq!(client.entities[&1].position[0], 9.0);
+        assert!(client.received_entities - before >= 1, "the unacknowledged change was sent again");
+    }
+
+    #[test]
+    fn a_delta_wider_than_one_packet_is_acknowledged_only_when_complete() {
+        let mut server = Server::bind("127.0.0.1:0").unwrap();
+        let mut client = Client::connect(&server.local_addr().unwrap().to_string(), "c").unwrap();
+        assert!(wait(|| {
+            server.poll();
+            client.poll();
+            client.client_id.is_some()
+        }));
+        let world: Vec<EntityState> = (0..100).map(|i| EntityState { id: i, position: [i as f32, 0.0, 0.0], rotation: [0.0, 0.0, 0.0, 1.0] }).collect();
+        server.broadcast(&world);
+        assert!(wait(|| {
+            client.poll();
+            client.entities.len() == 100
+        }));
+        assert!(client.snapshots >= 3, "100 entities need several packets, got {}", client.snapshots);
+        std::thread::sleep(Duration::from_millis(30));
+        server.poll();
+        let before = client.received_entities;
+        let snaps = client.snapshots;
+        server.broadcast(&world);
+        assert!(wait(|| {
+            client.poll();
+            client.snapshots > snaps
+        }));
+        assert_eq!(client.received_entities, before, "after the full tick was acknowledged nothing is resent");
     }
 
     #[test]
