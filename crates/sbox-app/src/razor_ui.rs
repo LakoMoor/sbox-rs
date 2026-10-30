@@ -185,9 +185,19 @@ fn truthy(cond: &str, values: &HashMap<String, String>) -> bool {
     on != negated
 }
 
+/// `foreach (var x in Items)` -> (`x`, `Items`).
+fn foreach_head(head: &str) -> Option<(&str, &str)> {
+    let inner = head.strip_prefix("foreach")?.trim().strip_prefix('(')?.strip_suffix(')')?;
+    let (decl, list) = inner.split_once(" in ")?;
+    let var = decl.split_whitespace().last()?;
+    Some((var, list.trim()))
+}
+
 /// Resolve data bindings: `@Name` becomes the bound text (nothing when unbound), `value=@Name` attributes become text
 /// (event attributes `onclick=@Handler` keep their expression), and `@if (Flag) {..} else {..}` keeps the branch the
-/// values select. `@foreach` and other blocks are dropped.
+/// values select. `@foreach (var x in Items) {..}` repeats its body once per line of the `Items` value; inside, `@x` is the
+/// line, `@x.Index` its position and, when the line looks like `Name=Ann;Score=3`, `@x.Name` / `@x.Score` its fields.
+/// Other blocks are dropped. Member access on plain values works as a dotted key (`@Player.Name` looks up `Player.Name`).
 pub fn bind(nodes: &[Node], values: &HashMap<String, String>) -> Vec<Node> {
     let mut out = Vec::new();
     // Whether the `if` / `else if` chain in progress has already taken a branch.
@@ -218,6 +228,20 @@ pub fn bind(nodes: &[Node], values: &HashMap<String, String>) -> Vec<Node> {
                     }
                 } else {
                     taken = false;
+                    if let Some((var, list)) = foreach_head(h) {
+                        let items = values.get(list).map(String::as_str).unwrap_or("");
+                        for (i, line) in items.lines().filter(|l| !l.is_empty()).enumerate() {
+                            let mut inner = values.clone();
+                            inner.insert(var.to_string(), line.to_string());
+                            inner.insert(format!("{var}.Index"), i.to_string());
+                            for field in line.split(';') {
+                                if let Some((k, v)) = field.split_once('=') {
+                                    inner.insert(format!("{var}.{}", k.trim()), v.trim().to_string());
+                                }
+                            }
+                            out.extend(bind(children, &inner));
+                        }
+                    }
                     false
                 };
                 if branch {
@@ -323,6 +347,26 @@ mod tests {
         let doc = parse("<root><h1>@Title</h1><p>Score: @Score</p><p>@Missing</p></root>").unwrap();
         let (items, _) = layout_bound(&doc, 0.0, 0.0, 300.0, &vals(&[("Title", "Hello"), ("Score", "42")]));
         assert_eq!(texts(&items), vec!["Hello", "Score: 42"], "unbound expressions leave nothing");
+    }
+
+    #[test]
+    fn foreach_repeats_its_body_per_line() {
+        let doc = parse("<root><ul>@foreach (var p in Players) {<li>@p.Index: @p.Name (@p.Score)</li>}</ul><p>@foreach (string s in Tags) {<b>@s</b>}</p></root>").unwrap();
+        let mut v = HashMap::new();
+        v.insert("Players".to_string(), "Name=Ann;Score=3\nName=Bob;Score=5".to_string());
+        v.insert("Tags".to_string(), "x\ny".to_string());
+        let bound = bind(&doc.nodes, &v);
+        let Node::Element { children, .. } = &bound[0] else { panic!() };
+        let Node::Element { children: ul, .. } = &children[0] else { panic!() };
+        assert_eq!(ul.len(), 2, "one <li> per player");
+        assert!(ul[0].text().contains("Ann") && ul[0].text().contains('3'));
+        assert!(ul[1].text().contains("Bob") && ul[1].text().contains('5'));
+        assert_eq!(children[1].text(), "x y", "a plain list repeats too");
+        // The loop variable does not leak, and an unbound list yields nothing.
+        let empty = bind(&doc.nodes, &HashMap::new());
+        let Node::Element { children, .. } = &empty[0] else { panic!() };
+        let Node::Element { children: ul, .. } = &children[0] else { panic!() };
+        assert!(ul.is_empty());
     }
 
     #[test]
