@@ -57,6 +57,17 @@ pub enum CaretMove {
     End,
 }
 
+/// A scrolling region inside the page: its panels, labels and buttons (ranges into the `Ui` vectors) move with
+/// `scroll_y` and are clipped to `rect`. The region itself still moves with the page's own scroll.
+pub struct ScrollArea {
+    pub rect: [f32; 4],
+    pub content_height: f32,
+    pub scroll_y: f32,
+    pub panels: std::ops::Range<usize>,
+    pub labels: std::ops::Range<usize>,
+    pub buttons: std::ops::Range<usize>,
+}
+
 pub struct Ui {
     /// 1x1 white texture that filled rectangles are tinted from.
     white: TextureId,
@@ -64,6 +75,7 @@ pub struct Ui {
     pub labels: Vec<Label>,
     pub buttons: Vec<Button>,
     pub fields: Vec<TextField>,
+    pub areas: Vec<ScrollArea>,
     hover: Option<usize>,
     focus: Option<usize>,
     dirty: Vec<usize>,
@@ -80,12 +92,24 @@ fn contains(rect: &[f32; 4], x: f32, y: f32) -> bool {
 
 impl Ui {
     pub fn new(white: TextureId) -> Self {
-        Self { white, panels: vec![], labels: vec![], buttons: vec![], fields: vec![], hover: None, focus: None, dirty: vec![], scroll_y: 0.0, content_height: 0.0, viewport_height: 0.0 }
+        Self { white, panels: vec![], labels: vec![], buttons: vec![], fields: vec![], areas: vec![], hover: None, focus: None, dirty: vec![], scroll_y: 0.0, content_height: 0.0, viewport_height: 0.0 }
     }
 
-    /// Topmost (last added) button under the point.
+    /// Vertical offset and clip rectangle (screen space) of widget `i` of a kind: the page scroll, plus the scroll of the
+    /// area that owns it, which also clips it. `owner` picks the widget's range out of an area.
+    fn placement(&self, i: usize, owner: impl Fn(&ScrollArea) -> &std::ops::Range<usize>) -> (f32, Option<[f32; 4]>) {
+        match self.areas.iter().find(|a| owner(a).contains(&i)) {
+            Some(a) => (self.scroll_y + a.scroll_y, Some([a.rect[0], a.rect[1] - self.scroll_y, a.rect[2], a.rect[3]])),
+            None => (self.scroll_y, None),
+        }
+    }
+
+    /// Topmost (last added) button under the point; one inside a scrolling area counts only where the area shows it.
     pub fn button_at(&self, x: f32, y: f32) -> Option<usize> {
-        self.buttons.iter().rposition(|b| contains(&b.rect, x, y + self.scroll_y))
+        (0..self.buttons.len()).rev().find(|&i| {
+            let (dy, clip) = self.placement(i, |a| &a.buttons);
+            clip.map_or(true, |c| contains(&c, x, y)) && contains(&self.buttons[i].rect, x, y + dy)
+        })
     }
 
     pub fn set_mouse(&mut self, x: f32, y: f32) {
@@ -152,6 +176,25 @@ impl Ui {
             self.type_char(c);
         }
         true
+    }
+
+    /// Wheel at a screen position: the innermost scrolling area under the pointer that still has room in that direction
+    /// takes it, otherwise the page scrolls. Returns whether anything moved.
+    pub fn scroll_at(&mut self, x: f32, y: f32, dy: f32) -> bool {
+        let page = self.scroll_y;
+        for a in self.areas.iter_mut().rev() {
+            let shown = [a.rect[0], a.rect[1] - page, a.rect[2], a.rect[3]];
+            if !contains(&shown, x, y) {
+                continue;
+            }
+            let max = (a.content_height - a.rect[3]).max(0.0);
+            let next = (a.scroll_y + dy).clamp(0.0, max);
+            if next != a.scroll_y {
+                a.scroll_y = next;
+                return true;
+            }
+        }
+        self.scroll_by(dy)
     }
 
     /// Scroll by `dy` pixels (positive = content moves up), clamped to the content.
@@ -295,39 +338,41 @@ impl Ui {
     /// Draw order: panels, buttons (with their labels), free labels.
     pub fn rects(&self) -> Vec<UiRect> {
         let mut out = Vec::new();
-        let dy = self.scroll_y;
-        let up = |r: [f32; 4]| [r[0], r[1] - dy, r[2], r[3]];
-        for p in &self.panels {
-            out.push(UiRect { texture: self.white, rect: up(p.rect), tint: p.color });
+        let up = |r: [f32; 4], dy: f32| [r[0], r[1] - dy, r[2], r[3]];
+        for (i, p) in self.panels.iter().enumerate() {
+            let (dy, clip) = self.placement(i, |a| &a.panels);
+            out.push(UiRect { texture: self.white, rect: up(p.rect, dy), tint: p.color, clip });
         }
         for (i, b) in self.buttons.iter().enumerate() {
+            let (dy, clip) = self.placement(i, |a| &a.buttons);
             let tint = if self.hover == Some(i) { b.hover_color } else { b.color };
-            out.push(UiRect { texture: self.white, rect: up(b.rect), tint });
+            out.push(UiRect { texture: self.white, rect: up(b.rect, dy), tint, clip });
             if let Some((tex, [w, h])) = b.label {
-                out.push(UiRect { texture: tex, rect: up([b.rect[0] + (b.rect[2] - w) * 0.5, b.rect[1] + (b.rect[3] - h) * 0.5, w, h]), tint: [1.0; 4] });
+                out.push(UiRect { texture: tex, rect: up([b.rect[0] + (b.rect[2] - w) * 0.5, b.rect[1] + (b.rect[3] - h) * 0.5, w, h], dy), tint: [1.0; 4], clip });
             }
         }
         for (i, f) in self.fields.iter().enumerate() {
             let focused = self.focus == Some(i);
-            out.push(UiRect { texture: self.white, rect: f.rect, tint: if focused { f.focus_color } else { f.color } });
+            out.push(UiRect { texture: self.white, rect: f.rect, tint: if focused { f.focus_color } else { f.color }, clip: None });
             let mut text_right = f.rect[0] + 8.0;
             if let (true, Some((a, b))) = (focused, Self::selection(f)) {
                 // Highlight behind the text between the measured offsets of the two ends.
                 let (xa, xb) = (if a == f.caret { f.caret_x } else { f.anchor_x }, if b == f.caret { f.caret_x } else { f.anchor_x });
-                out.push(UiRect { texture: self.white, rect: [f.rect[0] + 8.0 + xa, f.rect[1] + 6.0, (xb - xa).max(0.0), f.rect[3] - 12.0], tint: [0.25, 0.4, 0.8, 0.8] });
+                out.push(UiRect { texture: self.white, rect: [f.rect[0] + 8.0 + xa, f.rect[1] + 6.0, (xb - xa).max(0.0), f.rect[3] - 12.0], tint: [0.25, 0.4, 0.8, 0.8], clip: None });
             }
             if let Some((tex, [w, h])) = f.label {
-                out.push(UiRect { texture: tex, rect: [f.rect[0] + 8.0, f.rect[1] + (f.rect[3] - h) * 0.5, w, h], tint: [1.0; 4] });
+                out.push(UiRect { texture: tex, rect: [f.rect[0] + 8.0, f.rect[1] + (f.rect[3] - h) * 0.5, w, h], tint: [1.0; 4], clip: None });
                 text_right += w;
             }
             if focused {
                 // Caret at its measured offset (after the text when the app has not measured yet).
                 let x = if f.caret >= f.text.chars().count() { text_right } else { f.rect[0] + 8.0 + f.caret_x };
-                out.push(UiRect { texture: self.white, rect: [x + 2.0, f.rect[1] + 8.0, 2.0, f.rect[3] - 16.0], tint: [1.0; 4] });
+                out.push(UiRect { texture: self.white, rect: [x + 2.0, f.rect[1] + 8.0, 2.0, f.rect[3] - 16.0], tint: [1.0; 4], clip: None });
             }
         }
-        for l in &self.labels {
-            out.push(UiRect { texture: l.texture, rect: up(l.rect), tint: l.tint });
+        for (i, l) in self.labels.iter().enumerate() {
+            let (dy, clip) = self.placement(i, |a| &a.labels);
+            out.push(UiRect { texture: l.texture, rect: up(l.rect, dy), tint: l.tint, clip });
         }
         out
     }
@@ -466,6 +511,40 @@ mod tests {
         let r = ui.rects();
         let hl = r.iter().find(|u| u.tint == [0.25, 0.4, 0.8, 0.8]).expect("highlight");
         assert_eq!((hl.rect[0], hl.rect[2]), (10.0 + 8.0 + 10.0, 30.0));
+    }
+
+    #[test]
+    fn a_scroll_area_scrolls_its_own_content_and_clips_it() {
+        let mut ui = Ui::new(TextureId(0));
+        ui.content_height = 1000.0;
+        ui.viewport_height = 500.0;
+        // A 100-high window at y = 100 over 300 units of buttons: "in" at the top, "deep" at y = 250 (below the window).
+        ui.buttons.push(button("page", [0.0, 0.0, 50.0, 50.0]));
+        ui.buttons.push(button("in", [0.0, 110.0, 50.0, 30.0]));
+        ui.buttons.push(button("deep", [0.0, 250.0, 50.0, 30.0]));
+        ui.areas.push(ScrollArea { rect: [0.0, 100.0, 50.0, 100.0], content_height: 300.0, scroll_y: 0.0, panels: 0..0, labels: 0..0, buttons: 1..3 });
+        assert_eq!(ui.click(10.0, 120.0), Some("in"));
+        assert_eq!(ui.click(10.0, 260.0), None, "outside the window, so the clipped button cannot be hit");
+        // The wheel over the window scrolls the window, not the page.
+        assert!(ui.scroll_at(10.0, 150.0, 140.0));
+        assert_eq!((ui.areas[0].scroll_y, ui.scroll_y), (140.0, 0.0));
+        assert_eq!(ui.click(10.0, 120.0), Some("deep"), "250 - 140 = 110: now inside the window");
+        assert_eq!(ui.click(10.0, 99.0), None, "'in' scrolled out above the window");
+        // Rects of area content are clipped to the window; the page's own button is not.
+        let r = ui.rects();
+        assert_eq!(r[0].clip, None);
+        assert_eq!(r[1].clip, Some([0.0, 100.0, 50.0, 100.0]));
+        assert_eq!(r[2].rect[1], 250.0 - 140.0);
+        // At the end of the area the wheel falls through to the page.
+        assert!(ui.scroll_at(10.0, 150.0, 1000.0));
+        assert_eq!(ui.areas[0].scroll_y, 200.0, "limited to content - window");
+        assert!(ui.scroll_at(10.0, 150.0, 100.0));
+        assert_eq!((ui.areas[0].scroll_y, ui.scroll_y), (200.0, 100.0), "the area is at its end, so the page moves");
+        // With the page scrolled, the window and its clip move up with it.
+        assert_eq!(ui.rects()[1].clip, Some([0.0, 0.0, 50.0, 100.0]));
+        // Outside every area the page scrolls.
+        assert!(ui.scroll_at(400.0, 400.0, 50.0));
+        assert_eq!(ui.scroll_y, 150.0);
     }
 
     #[test]

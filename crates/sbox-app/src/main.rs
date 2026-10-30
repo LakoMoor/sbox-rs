@@ -772,7 +772,7 @@ impl ApplicationHandler for App {
                 };
                 if let (Some(ui), Some(w)) = (&mut self.ui, &self.window) {
                     ui.viewport_height = w.inner_size().height as f32;
-                    if ui.scroll_by(-notches * 40.0) {
+                    if ui.scroll_at(self.cursor.0, self.cursor.1, -notches * 40.0) {
                         self.refresh_ui();
                         return;
                     }

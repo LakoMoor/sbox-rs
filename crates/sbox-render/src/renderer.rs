@@ -110,6 +110,8 @@ pub struct UiRect {
     pub rect: [f32; 4],
     /// Multiplied with the texture; rgb in sRGB.
     pub tint: [f32; 4],
+    /// Only this part of the screen (x, y, width, height in pixels) is drawn into, for contents of a scrolling area.
+    pub clip: Option<[f32; 4]>,
 }
 
 struct HdrTarget {
@@ -1272,6 +1274,7 @@ impl Renderer {
             };
             self.queue.write_buffer(&self.post_buf, 0, bytemuck::bytes_of(&post));
             let mut ui_groups = Vec::new();
+            let mut ui_clips: Vec<Option<[f32; 4]>> = Vec::new();
             let mut ui_verts: Vec<f32> = Vec::new();
             let (sw, sh) = (size.0 as f32, size.1 as f32);
             for u in &self.overlay {
@@ -1284,6 +1287,7 @@ impl Renderer {
                         wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
                     ],
                 }));
+                ui_clips.push(u.clip);
                 let [x, y, w, h] = u.rect;
                 let (x0, x1) = (x / sw * 2.0 - 1.0, (x + w) / sw * 2.0 - 1.0);
                 let (y0, y1) = (1.0 - y / sh * 2.0, 1.0 - (y + h) / sh * 2.0);
@@ -1318,7 +1322,27 @@ impl Renderer {
             if let Some(buf) = &ui_buf {
                 pass.set_pipeline(&self.ui_pipeline);
                 pass.set_vertex_buffer(0, buf.slice(..));
+                let full = (0u32, 0u32, size.0, size.1);
+                let mut last = full;
                 for (i, g) in ui_groups.iter().enumerate() {
+                    // A scissor per clipped rectangle, clamped to the surface; an empty one skips the draw.
+                    let want = match ui_clips[i] {
+                        None => full,
+                        Some([cx, cy, cw, ch]) => {
+                            let x0 = cx.max(0.0).floor().min(sw) as u32;
+                            let y0 = cy.max(0.0).floor().min(sh) as u32;
+                            let x1 = (cx + cw).max(0.0).ceil().min(sw) as u32;
+                            let y1 = (cy + ch).max(0.0).ceil().min(sh) as u32;
+                            (x0, y0, x1.saturating_sub(x0), y1.saturating_sub(y0))
+                        }
+                    };
+                    if want.2 == 0 || want.3 == 0 {
+                        continue;
+                    }
+                    if want != last {
+                        pass.set_scissor_rect(want.0, want.1, want.2, want.3);
+                        last = want;
+                    }
                     pass.set_bind_group(0, g, &[]);
                     pass.draw(i as u32 * 6..i as u32 * 6 + 6, 0..1);
                 }

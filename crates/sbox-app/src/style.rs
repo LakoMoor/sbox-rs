@@ -14,6 +14,8 @@ pub struct Style {
     pub height: Option<f32>,
     /// `flex-direction: row`.
     pub row: bool,
+    /// `overflow: scroll` / `auto` (also `overflow-y`): the content scrolls inside the element's fixed height.
+    pub scroll: bool,
 }
 
 pub fn parse_color(v: &str) -> Option<[f32; 4]> {
@@ -80,6 +82,7 @@ impl Style {
                 "width" => self.width = px(v).or(self.width),
                 "height" => self.height = px(v).or(self.height),
                 "flex-direction" => self.row = v == "row" || v == "row-reverse",
+                "overflow" | "overflow-y" => self.scroll = v == "scroll" || v == "auto",
                 _ => {}
             }
         }
@@ -228,10 +231,10 @@ mod tests {
     #[test]
     fn declarations_apply_to_a_style() {
         let mut s = Style::default();
-        s.apply(&parse_declarations("color: #00f; font-size: 28px; padding: 4px 8px; width: 120px; flex-direction: row; unknown: 1; gap: x"));
+        s.apply(&parse_declarations("color: #00f; font-size: 28px; padding: 4px 8px; width: 120px; flex-direction: row; unknown: 1; gap: x; overflow-y: auto"));
         assert_eq!(s.color, Some([0.0, 0.0, 1.0, 1.0]));
         assert_eq!((s.font_size, s.padding, s.width, s.gap), (Some(28.0), Some(4.0), Some(120.0), None));
-        assert!(s.row);
+        assert!(s.row && s.scroll);
     }
 
     #[test]

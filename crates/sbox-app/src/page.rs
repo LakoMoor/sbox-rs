@@ -29,11 +29,13 @@ pub struct Page {
     panels: Range<usize>,
     labels: Range<usize>,
     buttons: Range<usize>,
+    /// How many scroll areas the UI had before the page added its own.
+    areas: usize,
 }
 
 impl Page {
     pub fn new(doc: Document, values: HashMap<String, String>) -> Self {
-        let mut p = Self { doc, values, opacity: 1.0, scale: 1.0, handlers: HashMap::new(), panels: 0..0, labels: 0..0, buttons: 0..0 };
+        let mut p = Self { doc, values, opacity: 1.0, scale: 1.0, handlers: HashMap::new(), panels: 0..0, labels: 0..0, buttons: 0..0, areas: 0 };
         p.register_defaults();
         p
     }
@@ -72,6 +74,7 @@ impl Page {
         ui.panels.drain(self.panels.clone());
         ui.labels.drain(self.labels.clone());
         ui.buttons.drain(self.buttons.clone());
+        ui.areas.truncate(self.areas);
         let (k, a) = (self.scale, self.opacity);
         // Laid out at 1x and then scaled, so the page keeps its proportions.
         let (items, content) = razor_ui::layout_bound(&self.doc, 40.0, 40.0, 520.0, &self.values);
@@ -82,8 +85,17 @@ impl Page {
         self.panels = ui.panels.len()..ui.panels.len();
         self.labels = ui.labels.len()..ui.labels.len();
         self.buttons = ui.buttons.len()..ui.buttons.len();
+        self.areas = ui.areas.len();
+        // Areas being built: (rect, content height, where their widgets start).
+        let mut open: Vec<([f32; 4], f32, usize, usize, usize)> = Vec::new();
         for item in items {
             match item {
+                Item::AreaStart { rect, content_height } => open.push((rect, content_height, ui.panels.len(), ui.labels.len(), ui.buttons.len())),
+                Item::AreaEnd => {
+                    if let Some((rect, content_height, p, l, b)) = open.pop() {
+                        ui.areas.push(ui::ScrollArea { rect: r4(rect), content_height: content_height * k, scroll_y: 0.0, panels: p..ui.panels.len(), labels: l..ui.labels.len(), buttons: b..ui.buttons.len() });
+                    }
+                }
                 Item::Panel { rect, color } => ui.panels.push(ui::Panel { rect: r4(rect), color: fade(color) }),
                 Item::Text { text, size, color, rect } => {
                     let (texture, [w, h]) = crate::App::text_texture(r, font, &text, size * k);

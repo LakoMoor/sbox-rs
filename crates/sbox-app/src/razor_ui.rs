@@ -14,6 +14,9 @@ pub enum Item {
     Panel { rect: [f32; 4], color: [f32; 4] },
     Text { text: String, size: f32, color: [f32; 4], rect: [f32; 4] },
     Button { id: String, text: String, rect: [f32; 4], color: Option<[f32; 4]> },
+    /// Everything up to the matching `AreaEnd` scrolls inside `rect`; `content_height` is the height of that content.
+    AreaStart { rect: [f32; 4], content_height: f32 },
+    AreaEnd,
 }
 
 const PADDING: f32 = 12.0;
@@ -94,7 +97,13 @@ impl Ctx<'_> {
     /// (width, height) `n` wants inside a container `avail` wide; `None` width means "share the free space".
     fn measure(&self, n: &Node, avail: f32, parent: &Style) -> (Option<f32>, f32) {
         let st = self.style(n, parent);
-        let natural = match n {
+        (st.width, st.height.unwrap_or_else(|| self.natural(n, &st, avail)))
+    }
+
+    /// Height `n` takes from its content alone, ignoring a `height` style.
+    fn natural(&self, n: &Node, st: &Style, avail: f32) -> f32 {
+        let st = st.clone();
+        match n {
             Node::Text(_) => Self::font_size(n, &st) * 1.3,
             Node::Element { tag, .. } if tag == "button" => BUTTON_HEIGHT,
             Node::Element { children, .. } => {
@@ -118,8 +127,7 @@ impl Ctx<'_> {
                 }
             }
             _ => 0.0,
-        };
-        (st.width, st.height.unwrap_or(natural))
+        }
     }
 
     /// Widths of the children of a row: fixed ones as given, the rest share what is left.
@@ -165,8 +173,19 @@ impl Ctx<'_> {
                 } else {
                     kids.iter().map(|k| (Size::Fixed(self.measure(k, inner_w, &st).1), None)).collect()
                 };
-                for (k, r) in kids.iter().zip(stack.place(rect, &sizes)) {
+                // A fixed-height element with `overflow: scroll` lays its children out at their natural height and lets
+                // the app scroll them inside the element.
+                let scrolling = st.scroll && st.height.is_some();
+                let content = if scrolling { self.natural(n, &st, rect[2]) } else { rect[3] };
+                if scrolling {
+                    out.push(Item::AreaStart { rect, content_height: content });
+                }
+                let laid = [rect[0], rect[1], rect[2], content];
+                for (k, r) in kids.iter().zip(stack.place(laid, &sizes)) {
                     self.place(k, r, &st, out);
+                }
+                if scrolling {
+                    out.push(Item::AreaEnd);
                 }
             }
             _ => {}
@@ -367,6 +386,22 @@ mod tests {
         let Node::Element { children, .. } = &empty[0] else { panic!() };
         let Node::Element { children: ul, .. } = &children[0] else { panic!() };
         assert!(ul.is_empty());
+    }
+
+    #[test]
+    fn overflow_scroll_wraps_the_children_in_an_area() {
+        let doc = parse("<root style=\"padding: 0px; gap: 0px\"><div style=\"height: 100px; overflow-y: scroll; padding: 0px; gap: 0px\"><p>a</p><p>b</p><p>c</p><p>d</p><p>e</p></div><p>after</p></root>").unwrap();
+        let (items, height) = layout(&doc, 0.0, 0.0, 300.0);
+        let Some(Item::AreaStart { rect, content_height }) = items.iter().find(|i| matches!(i, Item::AreaStart { .. })) else { panic!("{items:?}") };
+        assert_eq!(rect[3], 100.0);
+        assert_eq!(*content_height, 5.0 * 26.0, "five 20px lines at 1.3 line height");
+        let start = items.iter().position(|i| matches!(i, Item::AreaStart { .. })).unwrap();
+        let end = items.iter().position(|i| matches!(i, Item::AreaEnd)).unwrap();
+        assert_eq!(items[start + 1..end].iter().filter(|i| matches!(i, Item::Text { .. })).count(), 5);
+        // The element takes only its fixed height in the page flow, and what follows sits below it.
+        let Some(Item::Text { rect: after, .. }) = items[end..].iter().find(|i| matches!(i, Item::Text { .. })) else { panic!() };
+        assert!(after[1] >= 100.0 && after[1] < 110.0, "after the 100px area, got {}", after[1]);
+        assert!(height < 140.0);
     }
 
     #[test]
