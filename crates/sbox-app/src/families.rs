@@ -12,6 +12,9 @@ pub enum Family {
     Skin,
     /// `water_simple` (10): translucent, nearly mirror smooth.
     Water,
+    /// `glass` (6, helmet visors and gas-mask lenses): the reference refracts and blurs what is behind it; here a smooth,
+    /// mostly transparent dielectric.
+    Glass,
     /// `blendable` (19): several texture layers blended by vertex data; only the first layer is drawn.
     Blendable,
     /// `tools_*` (sprites, wireframes, solids): editor helpers that the game does not draw.
@@ -27,6 +30,7 @@ impl Family {
             n if n.starts_with("tools_") => Family::Tools,
             "skin" => Family::Skin,
             "water_simple" | "water" => Family::Water,
+            "glass" => Family::Glass,
             "blendable" => Family::Blendable,
             _ => Family::Standard,
         }
@@ -45,6 +49,12 @@ impl Family {
                 d.roughness = 0.05;
                 d.metalness = 0.0;
                 d.tint = [d.tint[0] * 0.3, d.tint[1] * 0.55, d.tint[2] * 0.65, 0.6];
+            }
+            Family::Glass => {
+                d.translucent = true;
+                d.metalness = 0.0;
+                d.roughness = d.roughness.min(0.15);
+                d.tint[3] = d.tint[3].min(0.35);
             }
             Family::Tools => {
                 d.translucent = true;
@@ -66,6 +76,7 @@ mod tests {
         assert_eq!(Family::of("shaders/skin.shader"), Family::Skin);
         assert_eq!(Family::of("shaders/water_simple.shader"), Family::Water);
         assert_eq!(Family::of("shaders/blendable.shader_c"), Family::Blendable);
+        assert_eq!(Family::of("shaders/glass.shader"), Family::Glass);
         assert_eq!(Family::of("shaders/tools_sprite.shader"), Family::Tools);
         assert_eq!(Family::of("shaders/tools_wireframe.shader"), Family::Tools);
         assert_eq!(Family::of(""), Family::Standard);
@@ -74,6 +85,10 @@ mod tests {
     #[test]
     fn families_adjust_the_material() {
         let base = MaterialDesc { tint: [1.0; 4], roughness: 0.2, metalness: 1.0, ..Default::default() };
+
+        let mut glass = base.clone();
+        Family::Glass.apply(&mut glass);
+        assert!(glass.translucent && glass.metalness == 0.0 && glass.roughness == 0.15 && glass.tint[3] == 0.35);
 
         let mut skin = base.clone();
         Family::Skin.apply(&mut skin);
