@@ -74,7 +74,7 @@ struct Ctx<'a> {
 impl Ctx<'_> {
     /// Computed style of `n`; colour and font size are inherited from `parent`.
     fn style(&self, n: &Node, parent: &Style) -> Style {
-        let inherited = Style { color: parent.color, font_size: parent.font_size, ..Style::default() };
+        let inherited = Style { color: parent.color, font_size: parent.font_size, path: parent.path.clone(), ..Style::default() };
         match n {
             Node::Element { tag, .. } => {
                 let inline = match n.attr("style") {

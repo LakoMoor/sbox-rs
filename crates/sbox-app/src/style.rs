@@ -1,7 +1,8 @@
-//! A small CSS subset for Razor panels: declarations (`style="..."`) and rules on one element (`tag`, `.class`,
-//! `tag.class`, comma lists). SCSS nesting is flattened: `&.on { }` inside `.btn { }` becomes `.btn.on`. Descendant
-//! selectors (`.a .b`, also what plain nesting means), combinators, pseudo-classes, units other than `px`, and variables
-//! are not supported and such rules are ignored.
+//! A small CSS subset for Razor panels: declarations (`style="..."`) and rules made of `tag`, `.class`, `tag.class`
+//! compounds joined by descendant (`.a .b`) or child (`.a > .b`) combinators, in comma lists. SCSS nesting is flattened:
+//! `&.on { }` inside `.btn { }` becomes `.btn.on`, a plain nested `.b { }` means `.btn .b`. Sibling combinators,
+//! pseudo-classes, attribute / id / universal selectors, units other than `px`, and variables are not supported and such
+//! rules are ignored. Later rules beat earlier ones of the same specificity (classes count ten, a tag one).
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Style {
@@ -16,6 +17,8 @@ pub struct Style {
     pub row: bool,
     /// `overflow: scroll` / `auto` (also `overflow-y`): the content scrolls inside the element's fixed height.
     pub scroll: bool,
+    /// Tag and classes of the element and its ancestors, outermost first; what descendant selectors match against.
+    pub path: Vec<(String, Vec<String>)>,
 }
 
 pub fn parse_color(v: &str) -> Option<[f32; 4]> {
@@ -129,10 +132,57 @@ fn split_block(src: &str) -> (String, Vec<(String, String)>) {
     (decls, nested)
 }
 
+/// One compound selector: an optional tag and required classes.
 #[derive(Clone, Debug, PartialEq)]
-struct Selector {
+struct Simple {
     tag: Option<String>,
     classes: Vec<String>,
+}
+
+impl Simple {
+    fn matches(&self, tag: &str, classes: &[String]) -> bool {
+        self.tag.as_deref().map_or(true, |t| t == tag) && self.classes.iter().all(|c| classes.contains(c))
+    }
+}
+
+/// A compound selector chain: `parts[0]` is the outermost; `child[i]` says whether `parts[i]` must be the direct parent
+/// of `parts[i + 1]` (`>`) rather than any ancestor. The last part is the element itself.
+#[derive(Clone, Debug, PartialEq)]
+struct Selector {
+    parts: Vec<Simple>,
+    child: Vec<bool>,
+}
+
+impl Selector {
+    fn specificity(&self) -> usize {
+        self.parts.iter().map(|p| p.classes.len() * 10 + p.tag.is_some() as usize).sum()
+    }
+
+    fn matches(&self, tag: &str, classes: &[String], ancestors: &[(String, Vec<String>)]) -> bool {
+        let (last, rest) = self.parts.split_last().expect("a selector has a part");
+        if !last.matches(tag, classes) {
+            return false;
+        }
+        // Walk outwards: each remaining part takes the nearest ancestor that fits (exactly the parent for `>`).
+        let mut up = ancestors.len();
+        for (i, part) in rest.iter().enumerate().rev() {
+            let direct = self.child[i];
+            loop {
+                if up == 0 {
+                    return false;
+                }
+                up -= 1;
+                let (t, c) = &ancestors[up];
+                if part.matches(t, c) {
+                    break;
+                }
+                if direct {
+                    return false;
+                }
+            }
+        }
+        true
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -188,27 +238,52 @@ impl Stylesheet {
     }
 
     fn selector(s: &str) -> Option<Selector> {
-        if s.is_empty() || s.contains(|c: char| c.is_whitespace() || matches!(c, '>' | '+' | '~' | ':' | '[' | '#' | '*' | '@')) {
+        if s.is_empty() || s.contains(|c: char| matches!(c, '+' | '~' | ':' | '[' | '#' | '*' | '@' | '&')) {
             return None;
         }
-        let mut parts = s.split('.');
-        let tag = parts.next().filter(|t| !t.is_empty()).map(str::to_string);
-        let classes: Vec<String> = parts.map(str::to_string).collect();
-        Some(Selector { tag, classes })
+        let spaced = s.replace('>', " > ");
+        let mut parts = Vec::new();
+        let mut child = Vec::new();
+        let mut pending_child = false;
+        for tok in spaced.split_whitespace() {
+            if tok == ">" {
+                // A combinator needs a compound on both sides.
+                if parts.is_empty() || pending_child {
+                    return None;
+                }
+                pending_child = true;
+                continue;
+            }
+            if !parts.is_empty() {
+                child.push(pending_child);
+            }
+            pending_child = false;
+            let mut it = tok.split('.');
+            let tag = it.next().filter(|t| !t.is_empty()).map(str::to_string);
+            let classes: Vec<String> = it.map(str::to_string).collect();
+            if classes.iter().any(String::is_empty) || (tag.is_none() && classes.is_empty()) {
+                return None;
+            }
+            parts.push(Simple { tag, classes });
+        }
+        if parts.is_empty() || pending_child {
+            return None;
+        }
+        Some(Selector { parts, child })
     }
 
-    /// Style of an element: tag rules, then class rules, then the inline declarations (later rules win within a level).
+    /// Style of an element: the matching rules from least to most specific (later wins among equals), then the inline
+    /// declarations. The ancestors to match against are `base.path` (set by the caller from the parent); the result's
+    /// path ends with this element.
     pub fn compute(&self, tag: &str, classes: &[&str], inline: &str, mut base: Style) -> Style {
-        let matches = |s: &Selector| s.tag.as_deref().map_or(true, |t| t == tag) && s.classes.iter().all(|c| classes.contains(&c.as_str()));
-        // Specificity: tag-only < class rules.
-        for pass in [false, true] {
-            for (sel, decls) in &self.rules {
-                if sel.classes.is_empty() == !pass && matches(sel) {
-                    base.apply(decls);
-                }
-            }
+        let own: Vec<String> = classes.iter().map(|c| c.to_string()).collect();
+        let mut hits: Vec<(usize, usize)> = self.rules.iter().enumerate().filter(|(_, (sel, _))| sel.matches(tag, &own, &base.path)).map(|(i, (sel, _))| (sel.specificity(), i)).collect();
+        hits.sort_unstable();
+        for (_, i) in hits {
+            base.apply(&self.rules[i].1);
         }
         base.apply(&parse_declarations(inline));
+        base.path.push((tag.to_string(), own));
         base
     }
 }
@@ -246,8 +321,29 @@ mod tests {
         assert_eq!((plain.color, plain.font_size), (Some([1.0, 0.0, 0.0, 1.0]), Some(12.0)));
         assert_eq!(sheet.compute("h1", &[], "", Style::default()).color, Some([0.0, 0.5, 0.0, 1.0]));
         assert_eq!(sheet.compute("div", &["title"], "", Style::default()).color, Some([0.0, 0.5, 0.0, 1.0]));
-        // Combinators, pseudo-classes and nested rules are ignored.
+        // Pseudo-classes are ignored; `.a .b` needs an `.a` ancestor, which this bare element has not.
         assert_eq!(sheet.compute("div", &["a", "b", "x", "n", "m"], "", Style::default()).color, None);
+    }
+
+    #[test]
+    fn descendant_and_child_combinators_use_the_ancestor_chain() {
+        let sheet = Stylesheet::parse(".a .b { color: red } .a > .c { color: blue } .a .a { width: 7px } p { color: white } .a p { color: green } div.x > p.y { font-size: 9px } + .z { color: red } .q > { color: red }");
+        let el = |parent: Style, tag: &str, classes: &[&str]| sheet.compute(tag, classes, "", Style { path: parent.path.clone(), ..Style::default() });
+        let a = el(Style::default(), "div", &["a"]);
+        let mid = el(a.clone(), "span", &[]);
+        let deep_b = el(mid.clone(), "div", &["b"]);
+        assert_eq!(deep_b.color, Some([1.0, 0.0, 0.0, 1.0]), "any ancestor");
+        assert_eq!(el(a.clone(), "div", &["c"]).color, Some([0.0, 0.0, 1.0, 1.0]), "direct child");
+        assert_eq!(el(mid.clone(), "div", &["c"]).color, None, "a grandchild is not a child");
+        assert_eq!(el(Style::default(), "div", &["b"]).color, None);
+        // The more specific `.a p` beats the plain `p` wherever it sits in the sheet.
+        assert_eq!(el(mid, "p", &[]).color, Some([0.0, 0.5, 0.0, 1.0]));
+        assert_eq!(el(Style::default(), "p", &[]).color, Some([1.0; 4]));
+        let x = el(Style::default(), "div", &["x"]);
+        assert_eq!(el(x.clone(), "p", &["y"]).font_size, Some(9.0));
+        assert_eq!(el(el(x, "section", &[]), "p", &["y"]).font_size, None);
+        assert_eq!(el(a.clone(), "div", &["a"]).width, Some(7.0), "the same class on parent and child");
+        assert_eq!(el(Style::default(), "div", &["z"]).color, None, "dangling combinators are rejected");
     }
 
     #[test]
@@ -259,7 +355,9 @@ mod tests {
         assert_eq!(c("div", &["btn", "on"]).font_size, Some(10.0));
         assert_eq!(c("div", &["btn", "big"]).font_size, Some(40.0));
         assert_eq!(c("div", &["btn", "huge"]).font_size, Some(40.0));
-        assert_eq!(c("div", &["inner"]).color, None, "descendant rules are not applied to a bare .inner");
+        assert_eq!(c("div", &["inner"]).color, None, "`.btn .inner` needs a .btn ancestor");
+        let inside = sheet.compute("div", &["inner"], "", sheet.compute("div", &["btn"], "", Style::default()));
+        assert_eq!(inside.color, Some([0.0, 0.5, 0.0, 1.0]), "plain nesting is a descendant selector");
         assert_eq!(c("div", &["q"]).color, None);
         assert_eq!(c("label", &["t"]).width, Some(5.0), "& after a tag name");
         assert_eq!(c("label", &[]).width, None);
