@@ -1013,8 +1013,17 @@ pub mod replication {
 
     /// Move networked objects to their interpolated state (all but `skip`, the predicted local player).
     pub fn apply_interpolated(scene: &mut Scene, interp: &mut Interpolator, skip: Option<u32>) {
+        apply_interpolated_where(scene, interp, skip, |_| true)
+    }
+
+    /// Interpolate only the players (ids from [`PLAYER_ID_BASE`]); props are simulated and reconciled by the client.
+    pub fn apply_interpolated_players(scene: &mut Scene, interp: &mut Interpolator, skip: Option<u32>) {
+        apply_interpolated_where(scene, interp, skip, |id| id >= PLAYER_ID_BASE)
+    }
+
+    fn apply_interpolated_where(scene: &mut Scene, interp: &mut Interpolator, skip: Option<u32>, take: impl Fn(u32) -> bool) {
         // Objects for newly reported players are created by `apply_except`; this only moves existing ones.
-        let ids: Vec<_> = scene.iter_components::<NetworkId>().filter(|(_, n)| Some(n.0) != skip).map(|(go, n)| (go, n.0)).collect();
+        let ids: Vec<_> = scene.iter_components::<NetworkId>().filter(|(_, n)| Some(n.0) != skip && take(n.0)).map(|(go, n)| (go, n.0)).collect();
         for (go, id) in ids {
             if let Some((p, r)) = interp.sample(id) {
                 let mut t = scene.world_transform(go);
@@ -1022,6 +1031,35 @@ pub mod replication {
                 t.rotation = r;
                 scene.set_world_transform(go, t);
             }
+        }
+    }
+
+    /// Props further than this from the server's position are teleported there; closer ones are eased toward it.
+    pub const PROP_SNAP_DISTANCE: f32 = 64.0;
+    /// Differences below this are ignored (the two simulations agree).
+    pub const PROP_DEADZONE: f32 = 0.5;
+
+    /// What to do with a predicted prop whose local simulation is at `local` while the server reports `server`.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub enum PropCorrection {
+        Keep,
+        /// Move to this position (a step toward the server's), keeping the velocity.
+        Ease(Vec3),
+        /// Jump to the server's position and take its (zero) velocity: the simulations have diverged.
+        Snap(Vec3),
+    }
+
+    /// Reconcile a locally simulated prop with the server: agree within the dead zone, ease toward the server's position
+    /// over roughly an eighth of a second, and snap when the error is large (a collision the client did not see).
+    pub fn correct_prop(local: Vec3, server: Vec3, dt: f32) -> PropCorrection {
+        let err = server - local;
+        let d = err.length();
+        if d < PROP_DEADZONE {
+            PropCorrection::Keep
+        } else if d > PROP_SNAP_DISTANCE {
+            PropCorrection::Snap(server)
+        } else {
+            PropCorrection::Ease(local + err * (1.0 - (-dt.max(0.0) * 8.0).exp()))
         }
     }
 
@@ -1071,6 +1109,20 @@ pub mod replication {
     mod tests {
         use super::*;
         use crate::Server;
+
+        #[test]
+        fn prop_corrections_keep_ease_or_snap_by_distance() {
+            let at = |x: f32| Vec3::new(x, 0.0, 0.0);
+            assert_eq!(correct_prop(at(0.0), at(0.2), 0.016), PropCorrection::Keep);
+            let PropCorrection::Ease(p) = correct_prop(at(0.0), at(20.0), 0.016) else { panic!() };
+            assert!(p.x > 0.0 && p.x < 20.0 * 0.2, "a partial step, got {}", p.x);
+            // A longer frame closes more of the gap, never overshooting.
+            let PropCorrection::Ease(q) = correct_prop(at(0.0), at(20.0), 1.0) else { panic!() };
+            assert!(q.x > p.x && q.x <= 20.0);
+            assert_eq!(correct_prop(at(0.0), at(500.0), 0.016), PropCorrection::Snap(at(500.0)));
+            // A zero frame time changes nothing beyond the dead zone test.
+            assert_eq!(correct_prop(at(0.0), at(20.0), 0.0), PropCorrection::Ease(at(0.0)));
+        }
 
         #[test]
         fn players_follow_their_input_and_appear_on_other_clients() {

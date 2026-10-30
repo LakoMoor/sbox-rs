@@ -5,6 +5,7 @@ mod game;
 mod layout;
 mod meshcomp;
 mod page;
+mod props;
 #[allow(dead_code)]
 mod razor;
 mod razor_ui;
@@ -461,9 +462,7 @@ impl App {
             }
         }
         if let Some(addr) = join {
-            if let Some(p) = scene.resource_mut::<sbox_physics::Physics>() {
-                p.enabled = false;
-            }
+            // The client keeps simulating props itself (prediction) and reconciles them with the server's.
             match sbox_net::Client::connect(&addr, "player") {
                 Ok(c) => return Some(Net::Join(c, Instant::now(), Default::default(), Default::default())),
                 Err(e) => log::error!("--join {addr}: {e:#}"),
@@ -500,7 +499,7 @@ impl App {
                 server.broadcast(&sbox_net::replication::collect(&self.scene));
             }
             Some(Net::Join(client, last_try, prediction, interp)) => {
-                use sbox_net::replication::{apply_except, apply_interpolated, PLAYER_ID_BASE};
+                use sbox_net::replication::{apply_except, apply_interpolated_players, PLAYER_ID_BASE};
                 client.poll();
                 for (name, args) in client.take_rpcs() {
                     if let Err(err) = self.rpcs.dispatch(&mut self.scene, &name, &args) {
@@ -539,7 +538,8 @@ impl App {
                 apply_except(&mut self.scene, client, 0.0, own);
                 interp.advance(dt);
                 interp.record(client);
-                apply_interpolated(&mut self.scene, interp, own);
+                apply_interpolated_players(&mut self.scene, interp, own);
+                props::reconcile(&mut self.scene, &client.entities, dt);
             }
             None => {}
         }
@@ -565,7 +565,7 @@ impl App {
             m.tint = [c(0.0), c(0.33), c(0.66), 1.0];
             self.scene.add_component(go, m);
             // Only the host simulates: its players are kinematic bodies that shove props around.
-            if matches!(self.net, Some(Net::Host(..))) {
+            if matches!(self.net, Some(Net::Host(..) | Net::Join(..))) {
                 self.scene.add_component(go, sbox_physics::Rigidbody { kinematic: true, ..Default::default() });
                 self.scene.add_component(go, sbox_physics::Collider { shape: sbox_physics::Shape::Box { center: Vec3::ZERO, size: Vec3::new(32.0, 32.0, 72.0) }, is_trigger: false });
             }

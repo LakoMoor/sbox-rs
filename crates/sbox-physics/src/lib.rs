@@ -291,6 +291,27 @@ impl Physics {
         }
     }
 
+    /// Where the body of `go` is now (the scene transform only follows after the next step).
+    pub fn body_position(&self, go: GoId) -> Option<Vec3> {
+        let t = self.bodies.get(*self.body_of.get(&go)?)?.translation();
+        Some(Vec3::new(t.x, t.y, t.z))
+    }
+
+    /// Move the body of `go` (and wake it); `velocity` replaces its linear velocity when given. Returns whether the object
+    /// has a body. The scene transform is updated too, so the move shows before the next step.
+    pub fn set_body_state(&mut self, scene: &mut Scene, go: GoId, position: Vec3, velocity: Option<Vec3>) -> bool {
+        let Some(&h) = self.body_of.get(&go) else { return false };
+        let Some(b) = self.bodies.get_mut(h) else { return false };
+        b.set_translation(Vector3::new(position.x, position.y, position.z), true);
+        if let Some(v) = velocity {
+            b.set_linvel(Vector3::new(v.x, v.y, v.z), true);
+        }
+        let mut w = scene.world_transform(go);
+        w.position = position;
+        scene.set_world_transform(go, w);
+        true
+    }
+
     /// Create the rapier joints for [`Joint`] components whose two bodies both exist now.
     fn register_joints(&mut self, scene: &Scene) {
         let todo: Vec<GoId> = scene.iter_components::<Joint>().map(|(go, _)| go).filter(|g| !self.jointed.contains(g)).collect();
