@@ -224,6 +224,45 @@ mod tests {
         assert_eq!(m, ["Add", "Increment", "Reset", "Toggle"], "calls and parameters are not supported");
     }
 
+    /// Over the shipped pages: how many code blocks yield something, and that running every found method never panics.
+    #[test]
+    fn shipped_pages_yield_fields_and_methods() {
+        fn walk(d: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            let Ok(rd) = std::fs::read_dir(d) else { return };
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, out)
+                } else if p.extension().is_some_and(|x| x == "razor") {
+                    out.push(p)
+                }
+            }
+        }
+        let game = std::path::Path::new("E:/sbox-ref/game");
+        if !game.exists() {
+            return;
+        }
+        let mut files = Vec::new();
+        walk(game, &mut files);
+        let (mut with_code, mut with_methods, mut fields, mut methods, mut fully) = (0, 0, 0, 0, 0);
+        for f in files {
+            let Some(code) = crate::razor::parse(&std::fs::read_to_string(&f).unwrap_or_default()).ok().and_then(|d| d.code) else { continue };
+            with_code += 1;
+            let p = parse(&code);
+            let declared = code.matches("void ").count();
+            fields += p.fields.len();
+            methods += p.methods.len();
+            with_methods += (!p.methods.is_empty()) as usize;
+            fully += (declared > 0 && declared == p.methods.len()) as usize;
+            let mut v: Values = p.fields.iter().cloned().collect();
+            for m in p.methods.values() {
+                run(m, &mut v);
+            }
+        }
+        eprintln!("shipped pages: {with_code} with code, {with_methods} with a runnable method, {fields} fields, {methods} methods, {fully} where every void method is supported");
+        assert!(with_code > 100, "the shipped pages were found");
+    }
+
     #[test]
     fn methods_change_the_values() {
         let p = parse(CODE);
