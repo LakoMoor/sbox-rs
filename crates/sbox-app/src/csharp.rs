@@ -109,7 +109,8 @@ fn members(code: &str) -> Vec<String> {
                 '{' => depth += 1,
                 '}' => {
                     depth -= 1;
-                    if depth == 0 {
+                    // An auto-property's accessor block may be followed by `= value;`: keep it in one member.
+                    if depth == 0 && !cur.contains("get;") {
                         out.push(std::mem::take(&mut cur));
                     }
                 }
@@ -145,8 +146,17 @@ pub fn parse(code: &str) -> Program {
             if let Some(s) = stmts {
                 p.methods.insert(head.trim().to_string(), s);
             }
-        } else if matches!(ty, "int" | "float" | "double" | "bool" | "string") {
-            if let Some((name, init)) = rest.trim_end_matches(';').split_once('=') {
+        } else if matches!(ty.trim_end_matches('?'), "int" | "float" | "double" | "bool" | "string") {
+            // `T Name = lit;` and the auto-property `T Name { get; set; } = lit;` both give a starting value.
+            let rest = rest.trim_end_matches(';');
+            let rest = match rest.find('{') {
+                Some(i) if rest[i..].contains("get;") => {
+                    let after = rest[i..].split_once('}').map_or("", |(_, a)| a.trim());
+                    format!("{} {}", rest[..i].trim(), after)
+                }
+                _ => rest.to_string(),
+            };
+            if let Some((name, init)) = rest.split_once('=') {
                 if let (true, Some(v)) = (is_ident(name.trim()), literal(init)) {
                     p.fields.push((name.trim().to_string(), v));
                 }
@@ -218,7 +228,7 @@ mod tests {
     fn literal_fields_and_simple_methods_are_found() {
         let p = parse(CODE);
         let names: Vec<_> = p.fields.iter().map(|(n, v)| format!("{n}={v}")).collect();
-        assert_eq!(names, ["Count=3", "Title=Hi", "Show=true"], "auto-properties are not fields here");
+        assert_eq!(names, ["Count=3", "Open=false", "Title=Hi", "Show=true"], "an auto-property with an initialiser is a field too");
         let mut m: Vec<_> = p.methods.keys().cloned().collect();
         m.sort();
         assert_eq!(m, ["Add", "Increment", "Reset", "Toggle"], "calls and parameters are not supported");
