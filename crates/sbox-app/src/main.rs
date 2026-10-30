@@ -4,6 +4,7 @@ mod families;
 mod game;
 mod layout;
 mod meshcomp;
+mod page;
 #[allow(dead_code)]
 mod razor;
 mod razor_ui;
@@ -112,6 +113,8 @@ struct App {
     clipboard: Option<arboard::Clipboard>,
     /// A left-button press started in a text field and has not been released.
     dragging: bool,
+    /// The `--razor` page, if any, with its bound values and click handlers.
+    page: Option<page::Page>,
     /// Handlers for the RPCs this side accepts (host: `chat`; client: `notice`).
     rpcs: sbox_net::rpc::Registry<Scene>,
 }
@@ -209,7 +212,7 @@ impl App {
     }
 
     /// `--hud "text"` shows a label in the top-left corner; `--ui-demo` adds a panel with Play / Quit buttons.
-    fn build_ui(r: &mut Renderer, args: &[String]) -> Option<(ui::Ui, ab_glyph::FontVec)> {
+    fn build_ui(r: &mut Renderer, args: &[String]) -> Option<(ui::Ui, ab_glyph::FontVec, Option<page::Page>)> {
         let hud = args.iter().position(|a| a == "--hud").map(|i| args.get(i + 1).map_or("sbox-rs", String::as_str));
         let demo = args.iter().any(|a| a == "--ui-demo");
         let razor = args.iter().position(|a| a == "--razor").and_then(|i| args.get(i + 1));
@@ -226,6 +229,7 @@ impl App {
             let (texture, [w, h]) = Self::text_texture(r, &font, text, 28.0);
             ui.labels.push(ui::Label { texture, rect: [16.0, 16.0, w, h], tint: [1.0; 4] });
         }
+        let mut page = None;
         if let Some(path) = razor {
             match std::fs::read_to_string(path).map_err(anyhow::Error::from).and_then(|src| razor::parse(&src)) {
                 Ok(doc) => {
@@ -235,24 +239,9 @@ impl App {
                         .filter(|w| w[0] == "--bind")
                         .filter_map(|w| w[1].split_once('=').map(|(k, v)| (k.to_string(), v.to_string())))
                         .collect();
-                    let (items, content) = razor_ui::layout_bound(&doc, 40.0, 40.0, 520.0, &values);
-                    ui.content_height = 40.0 + content + 40.0;
-                    for item in items {
-                        match item {
-                            razor_ui::Item::Panel { rect, color } => ui.panels.push(ui::Panel { rect, color }),
-                            razor_ui::Item::Text { text, size, color, rect } => {
-                                let (texture, [w, h]) = Self::text_texture(r, &font, &text, size);
-                                ui.labels.push(ui::Label { texture, rect: [rect[0], rect[1], w, h], tint: color });
-                            }
-                            razor_ui::Item::Button { id, text, rect, color } => ui.buttons.push(ui::Button {
-                                id,
-                                rect,
-                                color: color.unwrap_or([0.18, 0.2, 0.3, 1.0]),
-                                hover_color: [0.3, 0.4, 0.7, 1.0],
-                                label: Some(Self::text_texture(r, &font, &text, 24.0)),
-                            }),
-                        }
-                    }
+                    let mut p = page::Page::new(doc, values);
+                    p.populate(&mut ui, r, &font);
+                    page = Some(p);
                 }
                 Err(e) => log::error!("--razor {path}: {e:#}"),
             }
@@ -290,7 +279,7 @@ impl App {
                 offsets: vec![0.0],
             });
         }
-        Some((ui, font))
+        Some((ui, font, page))
     }
 
     /// Start networking from `--host <addr>` / `--join <addr>`. Rigidbody objects get ids in scene order, which is the same
@@ -590,8 +579,9 @@ impl ApplicationHandler for App {
         let model = args.iter().find(|a| !a.starts_with("--") && a.ends_with(".vmdl_c")).cloned();
         self.camera = Some(Self::build_scene(&mut self.scene, &mut renderer, model.as_deref(), args.iter().position(|a| a == "--anim").and_then(|i| args.get(i + 1)).map(String::as_str), args.iter().position(|a| a == "--scene").and_then(|i| args.get(i + 1)).map(String::as_str)));
         self.net = Self::start_net(&mut self.scene, &args);
-        if let Some((ui, font)) = Self::build_ui(&mut renderer, &args) {
+        if let Some((ui, font, page)) = Self::build_ui(&mut renderer, &args) {
             self.ui = Some(ui);
+            self.page = page;
             self.ui_font = Some(font);
         }
         if let Some(ui) = &self.ui {
@@ -804,8 +794,16 @@ impl ApplicationHandler for App {
                 self.refresh_ui();
                 if let Some(id) = self.ui.as_ref().and_then(|ui| ui.click(self.cursor.0, self.cursor.1)) {
                     log::info!("ui: clicked {id}");
-                    if id.eq_ignore_ascii_case("quit") {
+                    let effect = self.page.as_mut().and_then(|p| p.click(&id));
+                    if effect == Some(page::Effect::Quit) || (effect.is_none() && id.eq_ignore_ascii_case("quit")) {
                         el.exit();
+                    }
+                    if effect.is_some() {
+                        // The handler changed the page's values: lay it out again.
+                        if let (Some(p), Some(ui), Some(font), Some(r)) = (&mut self.page, &mut self.ui, &self.ui_font, &mut self.renderer) {
+                            p.populate(ui, r, font);
+                            r.overlay = ui.rects();
+                        }
                     }
                     return;
                 }
@@ -846,7 +844,7 @@ fn main() -> anyhow::Result<()> {
     env_logger::init();
     let el = EventLoop::new()?;
     el.set_control_flow(ControlFlow::Poll);
-    let mut app = App { window: None, renderer: None, scene: Scene::new(), camera: None, last: Instant::now(), audio: None, ui: None, ui_font: None, cursor: (0.0, 0.0), net: None, mods: Default::default(), player_mesh: None, clipboard: arboard::Clipboard::new().ok(), dragging: false, rpcs: net_rpcs() };
+    let mut app = App { window: None, renderer: None, scene: Scene::new(), camera: None, last: Instant::now(), audio: None, ui: None, ui_font: None, cursor: (0.0, 0.0), net: None, mods: Default::default(), player_mesh: None, clipboard: arboard::Clipboard::new().ok(), dragging: false, page: None, rpcs: net_rpcs() };
     el.run_app(&mut app)?;
     Ok(())
 }
