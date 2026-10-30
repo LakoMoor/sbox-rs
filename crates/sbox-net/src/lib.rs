@@ -10,7 +10,8 @@ use std::time::{Duration, Instant};
 const MAGIC: [u8; 2] = *b"sb";
 const MAX_PACKET: usize = 1400;
 /// Bytes one entity takes in a snapshot: id + 3 position + 4 rotation floats.
-const ENTITY_BYTES: usize = 32;
+/// Wire size of one entity: id, position as three f32, rotation as four i16 (unit quaternion components x 32767).
+const ENTITY_BYTES: usize = 24;
 
 /// State of one networked object in a snapshot.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -76,6 +77,9 @@ impl Reader<'_> {
     fn f32(&mut self) -> Result<f32> {
         Ok(f32::from_le_bytes(self.take(4)?.try_into()?))
     }
+    fn i16(&mut self) -> Result<f32> {
+        Ok(i16::from_le_bytes(self.take(2)?.try_into()?) as f32 / 32767.0)
+    }
 }
 
 impl Packet {
@@ -110,8 +114,11 @@ impl Packet {
                 w.u32(entities.len() as u32);
                 for e in entities {
                     w.u32(e.id);
-                    for v in e.position.iter().chain(&e.rotation) {
-                        w.f32(*v);
+                    for v in e.position {
+                        w.f32(v);
+                    }
+                    for v in e.rotation {
+                        w.0.extend(((v.clamp(-1.0, 1.0) * 32767.0).round() as i16).to_le_bytes());
                     }
                 }
                 w.0.push(removed.len().min(MAX_REMOVED) as u8);
@@ -167,7 +174,7 @@ impl Packet {
                 }
                 let mut entities = Vec::with_capacity(n);
                 for _ in 0..n {
-                    entities.push(EntityState { id: r.u32()?, position: [r.f32()?, r.f32()?, r.f32()?], rotation: [r.f32()?, r.f32()?, r.f32()?, r.f32()?] });
+                    entities.push(EntityState { id: r.u32()?, position: [r.f32()?, r.f32()?, r.f32()?], rotation: [r.i16()?, r.i16()?, r.i16()?, r.i16()?] });
                 }
                 let k = r.u8()? as usize;
                 if k > MAX_REMOVED {
@@ -725,13 +732,13 @@ mod tests {
             client.poll();
             client.client_id.is_some()
         }));
-        let world: Vec<EntityState> = (0..100).map(|i| EntityState { id: i, position: [i as f32, 0.0, 0.0], rotation: [0.0, 0.0, 0.0, 1.0] }).collect();
+        let world: Vec<EntityState> = (0..200).map(|i| EntityState { id: i, position: [i as f32, 0.0, 0.0], rotation: [0.0, 0.0, 0.0, 1.0] }).collect();
         server.broadcast(&world);
         assert!(wait(|| {
             client.poll();
-            client.entities.len() == 100
+            client.entities.len() == 200
         }));
-        assert!(client.snapshots >= 3, "100 entities need several packets, got {}", client.snapshots);
+        assert!(client.snapshots >= 3, "200 entities need several packets, got {}", client.snapshots);
         std::thread::sleep(Duration::from_millis(30));
         server.poll();
         let before = client.received_entities;
@@ -770,6 +777,18 @@ mod tests {
         assert!(!client.entities.contains_key(&2));
         assert_eq!(client.take_removed(), vec![2]);
         assert!(client.take_removed().is_empty());
+    }
+
+    #[test]
+    fn rotations_survive_the_wire_within_quantisation_error() {
+        let h = std::f32::consts::FRAC_1_SQRT_2;
+        let p = Packet::Snapshot { tick: 1, ack: 0, part: 0, parts: 1, entities: vec![EntityState { id: 3, position: [1.5, -2.0, 300.25], rotation: [0.0, h, 0.0, h] }], removed: vec![] };
+        let Packet::Snapshot { entities, .. } = Packet::decode(&p.encode()).unwrap() else { panic!() };
+        assert_eq!(entities[0].position, [1.5, -2.0, 300.25], "positions stay exact");
+        for (a, b) in entities[0].rotation.iter().zip([0.0, h, 0.0, h]) {
+            assert!((a - b).abs() < 1.0 / 32767.0, "{a} vs {b}");
+        }
+        assert_eq!(p.encode().len(), 2 + 1 + 4 + 4 + 2 + 4 + ENTITY_BYTES + 1);
     }
 
     #[test]
