@@ -20,7 +20,7 @@ pub struct LoadedModel {
 }
 
 impl LoadedModel {
-    /// Collision shape: the model's hulls / spheres / capsules, or its bounding box when it has no usable physics data.
+    /// Collision shape: the model's hulls / spheres / capsules / triangle meshes, or its bounding box when it has no usable physics data.
     pub fn collision_shape(&self) -> Shape {
         use sbox_resource::phys::PhysShape;
         let v = |a: &[f32; 3]| Vec3::from(*a);
@@ -31,6 +31,7 @@ impl LoadedModel {
                         PhysShape::Hull(p) => Shape::Hull(p.iter().map(v).collect()),
                         PhysShape::Sphere { center, radius } => Shape::Sphere { center: v(center), radius: *radius },
                         PhysShape::Capsule { a, b, radius } => Shape::Capsule { a: v(a), b: v(b), radius: *radius },
+                        PhysShape::Mesh { vertices, indices } => Shape::TriMesh { vertices: vertices.iter().map(v).collect(), indices: indices.clone() },
                     })
                     .collect(),
             ),

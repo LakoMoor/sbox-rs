@@ -83,6 +83,9 @@ pub enum Shape {
     Capsule { a: Vec3, b: Vec3, radius: f32 },
     /// Several shapes acting as one collider (model collision data).
     Compound(Vec<Shape>),
+    /// Triangle soup in object-local units. Concave and hollow: meant for static geometry (a dynamic body with one
+    /// collides, but rapier gives it no sensible volume or mass).
+    TriMesh { vertices: Vec<Vec3>, indices: Vec<[u32; 3]> },
 }
 
 impl Shape {
@@ -97,6 +100,13 @@ impl Shape {
             Shape::Sphere { center, radius } => (*center * scale, SharedShape::ball(radius * scale.abs().max_element())),
             Shape::Hull(points) => (Vec3::ZERO, SharedShape::convex_hull(&points.iter().map(p).collect::<Vec<_>>())?),
             Shape::Capsule { a, b, radius } => (Vec3::ZERO, SharedShape::capsule(p(a), p(b), radius * scale.abs().max_element())),
+            Shape::TriMesh { vertices, indices } => {
+                // Indices past the vertex list would panic inside parry: such a mesh is dropped.
+                if indices.is_empty() || indices.iter().flatten().any(|&i| i as usize >= vertices.len()) {
+                    return None;
+                }
+                (Vec3::ZERO, SharedShape::trimesh(vertices.iter().map(p).collect(), indices.clone()))
+            }
             Shape::Plane | Shape::Compound(_) => return None,
         })
     }
@@ -401,6 +411,28 @@ mod tests {
         }
         let z = scene.world_transform(b).position.z;
         assert!(z.abs() < 1.5, "the hull's bottom (object z=0) should rest on the plane, got {z}");
+    }
+
+    #[test]
+    fn a_ball_rests_on_a_triangle_mesh_floor_and_bad_meshes_are_dropped() {
+        let mut scene = Scene::new();
+        Physics::install(&mut scene);
+        // A 400x400 floor at z = 0 made of two triangles, facing up.
+        let v = |x: f32, y: f32| Vec3::new(x, y, 0.0);
+        let floor = scene.create_object("floor");
+        scene.add_component(floor, Collider { shape: Shape::TriMesh { vertices: vec![v(-200.0, -200.0), v(200.0, -200.0), v(200.0, 200.0), v(-200.0, 200.0)], indices: vec![[0, 1, 2], [0, 2, 3]] }, is_trigger: false });
+        let ball = scene.create_object("ball");
+        scene.set_local_transform(ball, Transform::from_position(Vec3::new(50.0, 50.0, 150.0)));
+        scene.add_component(ball, Rigidbody::default());
+        scene.add_component(ball, Collider { shape: Shape::Sphere { center: Vec3::ZERO, radius: 20.0 }, is_trigger: false });
+        // Out-of-range indices must not panic.
+        let bad = scene.create_object("bad");
+        scene.add_component(bad, Collider { shape: Shape::TriMesh { vertices: vec![Vec3::ZERO], indices: vec![[0, 1, 2]] }, is_trigger: false });
+        for _ in 0..300 {
+            scene.tick(1.0 / 50.0);
+        }
+        let z = scene.world_transform(ball).position.z;
+        assert!((z - 20.0).abs() < 1.5, "ball should rest on the mesh at z=20, got {z}");
     }
 
     #[test]

@@ -21,6 +21,7 @@ fn main() {
             PhysShape::Hull(v) => v.iter().for_each(|p| add(p, 0.0)),
             PhysShape::Sphere { center, radius } => add(center, *radius),
             PhysShape::Capsule { a, b, radius } => { add(a, *radius); add(b, *radius) }
+            PhysShape::Mesh { vertices, .. } => vertices.iter().for_each(|p| add(p, 0.0)),
         }
     }
     println!("shapes {pn:.1?} {px:.1?} ({} shapes)", list.len());
