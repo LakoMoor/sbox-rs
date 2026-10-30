@@ -234,7 +234,11 @@ impl<'a> P<'a> {
                     }
                     _ => bail!("unexpected closing tag </{name}> on line {}", self.s[..self.i].matches('\n').count() + 1),
                 }
-            } else if c == '<' && self.rest()[1..].chars().next().is_some_and(|c| c.is_alphabetic()) {
+            } else if c == '<'
+                && self.rest()[1..].chars().next().is_some_and(|c| c.is_alphabetic())
+                // `Foo<Bar>(` in the C# of a code block is a generic argument list, not an element.
+                && !self.s[..self.i].chars().next_back().is_some_and(|p| p.is_alphanumeric() || p == '_')
+            {
                 flush!();
                 out.push(self.element()?);
             } else if c == '}' && end == End::Brace {
@@ -502,6 +506,25 @@ mod tests {
         assert_eq!(d.nodes[0].text(), "One two three");
     }
 
+    #[test]
+    fn generic_arguments_in_code_blocks_are_not_tags() {
+        let d = parse("<root>@{ foreach (var g in Enum.GetValues<Group>()) { if (a < b) continue; <div class=\"x\">@g</div> } }</root>").unwrap();
+        let Node::Element { children, .. } = &d.nodes[0] else { panic!() };
+        assert!(matches!(&children[0], Node::Block { .. }));
+    }
+
+    #[test]
+    fn quotes_inside_expressions_in_attribute_values() {
+        let d = parse("<root>@if ( !Loading && Modes is { Label: { } modeLabel } modes )
+{
+ var fit = modes.FitFor( 1 );
+ <div class=\"mode @(fit.Fit == K.Poor ? \"mismatch\" : modes.M ? \"multi\" : \"\")\" tooltip=\"@(fit.Why ?? modes.Hint)\"><icon>@modes.Icon</icon></div>
+}</root>").unwrap();
+        let Node::Element { children, .. } = &d.nodes[0] else { panic!() };
+        let Node::Block { children, .. } = &children[0] else { panic!("{children:?}") };
+        assert!(children.iter().any(|n| matches!(n, Node::Element { tag, .. } if tag == "div")));
+    }
+
     /// Every `.razor` file of a local s&box checkout parses (skipped when the checkout is absent).
     #[test]
     fn parses_the_shipped_razor_files() {
@@ -526,8 +549,8 @@ mod tests {
             }
         }
         eprintln!("{} razor files, {} failed", files.len(), failed.len());
-        assert!(failed.len() * 50 <= files.len(), "more than 2% failed:
-{}", failed.iter().take(10).cloned().collect::<Vec<_>>().join("
+        assert!(failed.is_empty(), "razor files that do not parse:
+{}", failed.join("
 "));
         for f in failed.iter().take(10) {
             eprintln!("{f}");
