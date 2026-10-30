@@ -153,6 +153,22 @@ impl Component for RagdollSwitch {
     impl_component_any!();
 }
 
+/// Keeps a world panel facing the camera (`WorldPanel::look_at_camera`); the quad's front is its local -X side.
+struct Billboard {
+    camera: sbox_scene::GoId,
+}
+
+impl Component for Billboard {
+    fn on_update(&mut self, scene: &mut Scene, h: Handle) {
+        let to_camera = scene.world_transform(self.camera).position - scene.world_transform(h.go).position;
+        let yaw = (-to_camera.y).atan2(-to_camera.x).to_degrees();
+        let mut t = scene.local_transform(h.go);
+        t.rotation = Angles::new(0.0, yaw, 0.0).to_rotation();
+        scene.set_local_transform(h.go, t);
+    }
+    impl_component_any!();
+}
+
 /// Simple fly camera: WASD + QE, arrow keys to look.
 #[derive(Default)]
 struct FlyCamera {
@@ -307,6 +323,48 @@ impl App {
     fn text_texture_width(font: &ab_glyph::FontVec, text: &str, size: f32) -> f32 {
         let st = text::TextStyle { text: text.to_string(), color: [1.0; 4], font: "Poppins".into(), size, weight: 600, italic: false, line_height: 1.0, align: -1, scale: 1.0 };
         text::rasterise(font, &st).1 as f32
+    }
+
+    /// `--world-panel <file.razor>` puts the page on a quad in the world, 600 units in front of the camera with its top edge 120 above eye level: the page is laid
+    /// out at the `WorldPanel`'s size, drawn into a bitmap on the CPU and shown as an unlit translucent texture.
+    /// `--world-panel-look` makes it face the camera. Needs a font from a path argument inside the game directory.
+    fn build_world_panel(scene: &mut Scene, r: &mut Renderer, cam: sbox_scene::GoId, args: &[String]) {
+        let Some(path) = args.iter().position(|a| a == "--world-panel").and_then(|i| args.get(i + 1)) else { return };
+        let Some(font) = Self::load_ui_font(args) else {
+            log::warn!("--world-panel: no font found (pass a path inside the game directory)");
+            return;
+        };
+        let doc = match std::fs::read_to_string(path).map_err(anyhow::Error::from).and_then(|src| razor::parse(&src)) {
+            Ok(d) => d,
+            Err(e) => return log::error!("--world-panel {path}: {e:#}"),
+        };
+        let values: std::collections::HashMap<String, String> =
+            args.windows(2).filter(|w| w[0] == "--bind").filter_map(|w| w[1].split_once('=').map(|(k, v)| (k.to_string(), v.to_string()))).collect();
+        let panel = sbox_scene::WorldPanel { look_at_camera: args.iter().any(|a| a == "--world-panel-look"), ..Default::default() };
+        let (pw, ph) = ((panel.panel_size[0] * panel.render_scale) as u32, (panel.panel_size[1] * panel.render_scale) as u32);
+        let (items, _) = razor_ui::layout_bound(&doc, 0.0, 0.0, pw as f32, &values);
+        let img = page::bitmap(&items, pw, ph, Some(&font));
+        let tex = r.upload_rgba8(&img, pw, ph, true);
+        let mat = r.create_material_ex(&sbox_render::MaterialDesc { color: Some(tex), unlit: true, translucent: true, ..Default::default() });
+        // A vertical quad in the YZ plane facing -X, so a camera looking along +X sees it from the front. Its origin is the
+        // middle of its top edge, so the page (which starts at the top) is what sits near eye level.
+        let (hw, hh) = (panel.panel_size[0] * 0.5, panel.panel_size[1] * 0.5);
+        let vertex = |y: f32, z: f32, u: f32, v: f32| sbox_render::Vertex { position: [0.0, y, z], normal: [-1.0, 0.0, 0.0], uv: [u, v], joints: [0; 4], weights: [0.0; 4] };
+        let mesh = r.upload_mesh(&MeshData {
+            vertices: vec![vertex(hw, -hh * 2.0, 0.0, 1.0), vertex(-hw, -hh * 2.0, 1.0, 1.0), vertex(-hw, 0.0, 1.0, 0.0), vertex(hw, 0.0, 0.0, 0.0)],
+            indices: vec![0, 1, 2, 0, 2, 3],
+        });
+        let go = scene.create_object("world_panel");
+        let at = scene.world_transform(cam);
+        scene.set_local_transform(go, Transform::new(at.position + at.rotation * Vec3::new(600.0, 0.0, 120.0), Angles::new(0.0, 0.0, 0.0).to_rotation(), Vec3::ONE));
+        let mut m = ModelRenderer::new(mesh);
+        m.material = mat;
+        m.cast_shadows = false;
+        scene.add_component(go, m);
+        if panel.look_at_camera {
+            scene.add_component(go, Billboard { camera: cam });
+        }
+        scene.add_component(go, panel);
     }
 
     /// `--hud "text"` shows a label in the top-left corner; `--ui-demo` adds a panel with Play / Quit buttons.
@@ -688,6 +746,9 @@ impl ApplicationHandler for App {
         let args: Vec<String> = std::env::args().skip(1).collect();
         let model = args.iter().find(|a| !a.starts_with("--") && a.ends_with(".vmdl_c")).cloned();
         self.camera = Some(Self::build_scene(&mut self.scene, &mut renderer, model.as_deref(), args.iter().position(|a| a == "--anim").and_then(|i| args.get(i + 1)).map(String::as_str), args.iter().position(|a| a == "--scene").and_then(|i| args.get(i + 1)).map(String::as_str)));
+        if let Some(cam) = self.camera {
+            Self::build_world_panel(&mut self.scene, &mut renderer, cam, &args);
+        }
         // `--ssr` turns on screen-space reflections without needing a scene file that has the component.
         if args.iter().any(|a| a == "--ssr") {
             if let Some(cam) = self.camera {

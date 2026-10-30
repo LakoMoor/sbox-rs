@@ -116,6 +116,65 @@ impl Page {
     }
 }
 
+/// Draw laid-out items into an RGBA bitmap (straight alpha, sRGB bytes) of `w` x `h` pixels: panels and buttons as
+/// filled rectangles over what is already there, text blitted from the 4x supersampled glyph raster with a box filter.
+/// Without a font the text is left out. Scroll areas are drawn unscrolled and unclipped.
+pub fn bitmap(items: &[Item], w: u32, h: u32, font: Option<&ab_glyph::FontVec>) -> Vec<u8> {
+    let mut img = vec![0u8; (w * h * 4) as usize];
+    let blend = |img: &mut Vec<u8>, x: i32, y: i32, c: [f32; 3], a: f32| {
+        if x < 0 || y < 0 || x >= w as i32 || y >= h as i32 || a <= 0.0 {
+            return;
+        }
+        let o = ((y as u32 * w + x as u32) * 4) as usize;
+        let da = img[o + 3] as f32 / 255.0;
+        let oa = a + da * (1.0 - a);
+        for k in 0..3 {
+            let d = img[o + k] as f32 / 255.0;
+            img[o + k] = (((c[k] * a + d * da * (1.0 - a)) / oa.max(1e-6)) * 255.0).round() as u8;
+        }
+        img[o + 3] = (oa * 255.0).round() as u8;
+    };
+    let fill = |img: &mut Vec<u8>, rect: [f32; 4], color: [f32; 4]| {
+        for y in rect[1].floor() as i32..(rect[1] + rect[3]).ceil() as i32 {
+            for x in rect[0].floor() as i32..(rect[0] + rect[2]).ceil() as i32 {
+                blend(img, x, y, [color[0], color[1], color[2]], color[3]);
+            }
+        }
+    };
+    let text = |img: &mut Vec<u8>, s: &str, size: f32, color: [f32; 4], at: [f32; 2]| {
+        let Some(font) = font else { return };
+        let st = crate::text::TextStyle { text: s.to_string(), color: [1.0; 4], font: "Poppins".into(), size, weight: 600, italic: false, line_height: 1.0, align: -1, scale: 1.0 };
+        let (src, sw, sh) = crate::text::rasterise(font, &st);
+        let (tw, th) = (sw / 4, sh / 4);
+        for y in 0..th {
+            for x in 0..tw {
+                let mut cov = 0.0;
+                for sy in 0..4 {
+                    for sx in 0..4 {
+                        cov += src[(((y * 4 + sy) * sw + x * 4 + sx) * 4 + 3) as usize] as f32 / 255.0;
+                    }
+                }
+                blend(img, at[0] as i32 + x as i32, at[1] as i32 + y as i32, [color[0], color[1], color[2]], cov / 16.0 * color[3]);
+            }
+        }
+    };
+    for item in items {
+        match item {
+            Item::Panel { rect, color } => fill(&mut img, *rect, *color),
+            Item::Text { text: t, size, color, rect } => text(&mut img, t, *size, *color, [rect[0], rect[1]]),
+            Item::Button { text: t, rect, color, .. } => {
+                fill(&mut img, *rect, color.unwrap_or([0.18, 0.2, 0.3, 1.0]));
+                if let Some(font) = font {
+                    let width = crate::App::text_texture_width(font, t, 24.0) * 0.25;
+                    text(&mut img, t, 24.0, [1.0; 4], [rect[0] + (rect[2] - width) * 0.5, rect[1] + (rect[3] - 24.0 * 1.3) * 0.5]);
+                }
+            }
+            Item::AreaStart { .. } | Item::AreaEnd => {}
+        }
+    }
+    img
+}
+
 fn bump(v: &mut HashMap<String, String>, key: &str, by: i64) {
     let n = v.get(key).and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
     v.insert(key.to_string(), (n + by).to_string());
@@ -142,6 +201,25 @@ mod tests {
         assert_eq!(p.values["Show"], "true");
         p.click("Toggle");
         assert_eq!(p.values["Show"], "false");
+    }
+
+    #[test]
+    fn a_bitmap_composites_panels_over_each_other() {
+        let items = [
+            Item::Panel { rect: [0.0, 0.0, 4.0, 4.0], color: [1.0, 0.0, 0.0, 1.0] },
+            Item::Panel { rect: [2.0, 2.0, 2.0, 2.0], color: [0.0, 0.0, 1.0, 0.5] },
+            Item::Button { id: "b".into(), text: "ok".into(), rect: [6.0, 0.0, 2.0, 2.0], color: Some([0.0, 1.0, 0.0, 1.0]) },
+        ];
+        let img = bitmap(&items, 8, 4, None);
+        let px = |x: usize, y: usize| &img[(y * 8 + x) * 4..(y * 8 + x) * 4 + 4];
+        assert_eq!(px(0, 0), &[255, 0, 0, 255]);
+        assert_eq!(px(3, 3), &[128, 0, 128, 255], "half blue over red");
+        assert_eq!(px(5, 2), &[0, 0, 0, 0], "untouched stays transparent");
+        assert_eq!(px(7, 1), &[0, 255, 0, 255], "a button is a filled rectangle");
+        // Rectangles hanging over the edge are clipped, not wrapped.
+        let img = bitmap(&[Item::Panel { rect: [6.0, 2.0, 10.0, 10.0], color: [1.0; 4] }], 8, 4, None);
+        assert_eq!(&img[(3 * 8 + 7) * 4..(3 * 8 + 7) * 4 + 4], &[255; 4]);
+        assert_eq!(&img[(3 * 8 + 5) * 4..(3 * 8 + 5) * 4 + 4], &[0; 4]);
     }
 
     #[test]
