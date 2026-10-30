@@ -92,6 +92,31 @@ pub fn spawn_ragdoll(scene: &mut Scene, root: &Transform, parts: &[sbox_resource
     bodies
 }
 
+/// A mesh without skin weights (a rigid prop made of separate pieces: wheels, a lid) belongs to one bone: the one of the
+/// physics part nearest to the mesh's centre, so a ragdoll's bodies can carry it. A guess: the files do not say which
+/// bone a rigid mesh hangs on. Meshes that already have weights are left alone.
+fn bind_rigid_to_parts(data: &mut MeshData, parts: &[sbox_resource::phys::PhysPart], bone_names: &[String]) {
+    if data.vertices.is_empty() || data.vertices.iter().any(|v| v.weights.iter().any(|&w| w > 0.0)) {
+        return;
+    }
+    let n = data.vertices.len() as f32;
+    let centre = data.vertices.iter().fold(Vec3::ZERO, |a, v| a + Vec3::from(v.position)) / n;
+    let bone = parts
+        .iter()
+        .filter_map(|p| {
+            let bone = bone_names.iter().position(|b| Some(b) == p.bone.as_ref())?;
+            Some(((Vec3::from(p.position) - centre).length_squared(), bone))
+        })
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, b)| b);
+    if let Some(b) = bone {
+        for v in &mut data.vertices {
+            v.joints = [b as u8, 0, 0, 0];
+            v.weights = [1.0, 0.0, 0.0, 0.0];
+        }
+    }
+}
+
 pub struct Assets {
     pub fs: Option<vmat::GameFs>,
     models: HashMap<String, Option<Rc<LoadedModel>>>,
@@ -192,7 +217,11 @@ impl Assets {
                     mins = mins.min(Vec3::from(mm.mesh.mins));
                     maxs = maxs.max(Vec3::from(mm.mesh.maxs));
                     for dc in &mm.mesh.draw_calls {
-                        let mesh = r.upload_mesh(&MeshData::from_draw_call(dc));
+                        let mut data = MeshData::from_draw_call(dc);
+                        if let Some((phys, _)) = &md.ragdoll {
+                            bind_rigid_to_parts(&mut data, phys, &md.skeleton.names);
+                        }
+                        let mesh = r.upload_mesh(&data);
                         parts.push((mesh, self.material(r, &dc.material)));
                     }
                 }
