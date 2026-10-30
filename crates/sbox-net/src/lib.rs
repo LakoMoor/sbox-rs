@@ -3,7 +3,7 @@
 //! Networking). Packets are tiny and unreliable except for the connect handshake, which the client retries.
 
 use anyhow::{bail, Result};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::net::{SocketAddr, UdpSocket};
 use std::time::{Duration, Instant};
 
@@ -201,22 +201,40 @@ impl Outbox {
     }
 }
 
-/// Receiving side: tells fresh calls from retransmitted ones.
-#[derive(Default)]
+/// How far ahead of the next expected call an out-of-order one is still held (and acknowledged).
+const RPC_WINDOW: u32 = 256;
+
+/// Receiving side: drops retransmitted calls and releases the rest in the order they were made, holding early arrivals
+/// until the ones before them have come.
 struct Inbox {
-    seen: HashSet<u32>,
-    max: u32,
+    next: u32,
+    held: std::collections::BTreeMap<u32, (String, Vec<u8>)>,
+}
+
+impl Default for Inbox {
+    fn default() -> Self {
+        Self { next: 1, held: Default::default() }
+    }
 }
 
 impl Inbox {
-    fn fresh(&mut self, id: u32) -> bool {
-        let new = self.seen.insert(id);
-        self.max = self.max.max(id);
-        if self.seen.len() > 2048 {
-            let floor = self.max.saturating_sub(1024);
-            self.seen.retain(|&i| i >= floor);
+    /// Whether to acknowledge call `id`: everything already delivered or within the window (a call too far ahead is left
+    /// unacknowledged, so the sender keeps retrying it until the gap has closed).
+    fn acceptable(&self, id: u32) -> bool {
+        id < self.next.saturating_add(RPC_WINDOW)
+    }
+
+    /// Take call `id`; returns the calls that are now deliverable, in order.
+    fn accept(&mut self, id: u32, name: String, args: Vec<u8>) -> Vec<(String, Vec<u8>)> {
+        if id >= self.next && self.acceptable(id) {
+            self.held.insert(id, (name, args));
         }
-        new
+        let mut out = Vec::new();
+        while let Some(call) = self.held.remove(&self.next) {
+            out.push(call);
+            self.next += 1;
+        }
+        out
     }
 }
 
@@ -293,10 +311,14 @@ impl Server {
                 }
                 Packet::Rpc { id, name, args } => {
                     if let Some(&client_id) = self.clients.get(&from) {
-                        // Always acknowledge, even duplicates: the earlier ack may have been lost.
-                        let _ = self.socket.send_to(&Packet::RpcAck { id }.encode(), from);
-                        if self.reliable.get_mut(&client_id).is_some_and(|(_, inbox)| inbox.fresh(id)) {
-                            events.push(ServerEvent::Rpc { client_id, name, args });
+                        if let Some((_, inbox)) = self.reliable.get_mut(&client_id) {
+                            // Acknowledge duplicates too (the earlier ack may have been lost), but not calls beyond the window.
+                            if inbox.acceptable(id) {
+                                let _ = self.socket.send_to(&Packet::RpcAck { id }.encode(), from);
+                            }
+                            for (name, args) in inbox.accept(id, name, args) {
+                                events.push(ServerEvent::Rpc { client_id, name, args });
+                            }
                         }
                     }
                 }
@@ -391,10 +413,10 @@ impl Client {
             match Packet::decode(&buf[..n]) {
                 Ok(Packet::Accepted { client_id }) => self.client_id = Some(client_id),
                 Ok(Packet::Rpc { id, name, args }) => {
-                    let _ = self.socket.send(&Packet::RpcAck { id }.encode());
-                    if self.inbox.fresh(id) {
-                        self.rpcs.push((name, args));
+                    if self.inbox.acceptable(id) {
+                        let _ = self.socket.send(&Packet::RpcAck { id }.encode());
                     }
+                    self.rpcs.extend(self.inbox.accept(id, name, args));
                 }
                 Ok(Packet::RpcAck { id }) => self.out.ack(id),
                 Ok(Packet::Snapshot { tick, ack, entities }) if tick >= self.last_tick => {
@@ -544,6 +566,23 @@ mod tests {
         // Recording without new snapshots changes nothing.
         it.record(&client);
         assert_eq!(it.sample(7).unwrap().0.x, 100.0);
+    }
+
+    #[test]
+    fn calls_are_released_in_order() {
+        let mut inbox = Inbox::default();
+        let call = |n: &str| (n.to_string(), vec![]);
+        assert!(inbox.accept(2, "b".into(), vec![]).is_empty(), "2 waits for 1");
+        assert!(inbox.accept(3, "c".into(), vec![]).is_empty());
+        assert_eq!(inbox.accept(1, "a".into(), vec![]), vec![call("a"), call("b"), call("c")]);
+        assert!(inbox.accept(2, "b".into(), vec![]).is_empty(), "a retransmission is dropped");
+        assert!(inbox.accept(1, "a".into(), vec![]).is_empty());
+        assert_eq!(inbox.accept(4, "d".into(), vec![]), vec![call("d")]);
+        // Far ahead of the window: neither held nor acknowledged.
+        assert!(!inbox.acceptable(5 + RPC_WINDOW));
+        assert!(inbox.accept(5 + RPC_WINDOW, "x".into(), vec![]).is_empty());
+        assert!(inbox.held.is_empty());
+        assert!(inbox.acceptable(4), "already delivered ids are still acknowledged");
     }
 
     #[test]
