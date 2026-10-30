@@ -35,9 +35,31 @@ pub struct Page {
 
 impl Page {
     pub fn new(doc: Document, values: HashMap<String, String>) -> Self {
-        let mut p = Self { doc, values, opacity: 1.0, scale: 1.0, handlers: HashMap::new(), panels: 0..0, labels: 0..0, buttons: 0..0, areas: 0 };
-        p.register_defaults();
+        let program = doc.code.as_deref().map(crate::csharp::parse);
+        let mut values = values;
+        let mut p = Self { doc, values: HashMap::new(), opacity: 1.0, scale: 1.0, handlers: HashMap::new(), panels: 0..0, labels: 0..0, buttons: 0..0, areas: 0 };
+        // Fields of the page's `@code` block give starting values (explicit ones win); its simple methods become handlers.
+        if let Some(prog) = program {
+            for (k, v) in prog.fields {
+                values.entry(k).or_insert(v);
+            }
+            for (name, stmts) in prog.methods {
+                p.on(&name, move |v| {
+                    crate::csharp::run(&stmts, v);
+                    Effect::None
+                });
+            }
+        }
+        p.values = values;
+        p.register_defaults_if_missing();
         p
+    }
+
+    /// The built-in demo handlers, except where the page's own code already defines one of that name.
+    fn register_defaults_if_missing(&mut self) {
+        let mine: Vec<(String, Handler)> = self.handlers.drain().collect();
+        self.register_defaults();
+        self.handlers.extend(mine);
     }
 
     /// Handlers every page gets: `Quit`, and `Increment` / `Decrement` / `Toggle` acting on the `Count` and `Show` values.
@@ -191,6 +213,23 @@ mod tests {
 
     fn page(src: &str) -> Page {
         Page::new(crate::razor::parse(src).unwrap(), HashMap::new())
+    }
+
+    #[test]
+    fn the_pages_own_code_block_sets_values_and_defines_handlers() {
+        let mut p = page("<root><button onclick=@Bump>+</button>@Score</root>
+@code
+{
+    int Score = 10;
+    void Bump() { Score += 5; }
+    void Increment() { Score = 0; }
+}
+");
+        assert_eq!(p.values["Score"], "10", "the field's literal is the starting value");
+        p.click("Bump");
+        assert_eq!(p.values["Score"], "15");
+        p.click("Increment");
+        assert_eq!(p.values["Score"], "0", "the page's method wins over the built-in demo handler");
     }
 
     #[test]
