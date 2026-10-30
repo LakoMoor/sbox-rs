@@ -43,8 +43,16 @@ pub fn shapes(kv: &Value) -> Option<Vec<PhysShape>> {
     let parts = kv.get("m_parts").and_then(Value::as_array)?;
     let mut out = Vec::new();
     for (i, part) in parts.iter().enumerate() {
-        let m = bind(kv, i);
-        let m_bind = m;
+        out.extend(part_shapes(part, &bind(kv, i))?);
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+/// The shapes of one part, moved by `m_bind` (`None`: left in the part's own space).
+fn part_shapes(part: &Value, m_bind: &Option<[f32; 12]>) -> Option<Vec<PhysShape>> {
+    let m = *m_bind;
+    let mut out = Vec::new();
+    {
         let sh = part.get("m_rnShape")?;
         let list = |k: &str| sh.get(k).and_then(Value::as_array).unwrap_or(&[]);
         for h in list("m_hulls") {
@@ -74,7 +82,129 @@ pub fn shapes(kv: &Value) -> Option<Vec<PhysShape>> {
             }
         }
     }
+    Some(out)
+}
+
+/// One rigid part of a model's physics: shapes in the part's own space, and where the part sits in the rest pose.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PhysPart {
+    pub shapes: Vec<PhysShape>,
+    pub position: [f32; 3],
+    /// Rest rotation as a quaternion `[x, y, z, w]`.
+    pub rotation: [f32; 4],
+    pub mass: f32,
+}
+
+/// A twist / swing joint between two parts (`m_joints[]`, `m_nType` 4). Frames are `(position, rotation [x, y, z, w])`
+/// in the space of each part.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PhysJoint {
+    pub body1: usize,
+    pub body2: usize,
+    pub frame1: ([f32; 3], [f32; 4]),
+    pub frame2: ([f32; 3], [f32; 4]),
+    /// Largest swing in radians, if limited.
+    pub swing: Option<f32>,
+    /// Twist range `[min, max]` in radians, if limited.
+    pub twist: Option<[f32; 2]>,
+    pub collide: bool,
+}
+
+/// Rotation (xyzw) of a row-major 3x4 rest-pose matrix (translation in the last column).
+fn matrix_rotation(m: &[f32; 12]) -> [f32; 4] {
+    let (r00, r01, r02, r10, r11, r12, r20, r21, r22) = (m[0], m[1], m[2], m[4], m[5], m[6], m[8], m[9], m[10]);
+    let tr = r00 + r11 + r22;
+    let q = if tr > 0.0 {
+        let s = (tr + 1.0).sqrt() * 2.0;
+        [(r21 - r12) / s, (r02 - r20) / s, (r10 - r01) / s, 0.25 * s]
+    } else if r00 > r11 && r00 > r22 {
+        let s = (1.0 + r00 - r11 - r22).sqrt() * 2.0;
+        [0.25 * s, (r01 + r10) / s, (r02 + r20) / s, (r21 - r12) / s]
+    } else if r11 > r22 {
+        let s = (1.0 + r11 - r00 - r22).sqrt() * 2.0;
+        [(r01 + r10) / s, 0.25 * s, (r12 + r21) / s, (r02 - r20) / s]
+    } else {
+        let s = (1.0 + r22 - r00 - r11).sqrt() * 2.0;
+        [(r02 + r20) / s, (r12 + r21) / s, 0.25 * s, (r10 - r01) / s]
+    };
+    let n = q.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-9);
+    [q[0] / n, q[1] / n, q[2] / n, q[3] / n]
+}
+
+/// The physics parts as separate bodies, each with its own-space shapes and rest pose (for a ragdoll).
+pub fn parts(kv: &Value) -> Option<Vec<PhysPart>> {
+    let list = kv.get("m_parts").and_then(Value::as_array)?;
+    let mut out = Vec::new();
+    for (i, part) in list.iter().enumerate() {
+        let m = bind(kv, i);
+        let (position, rotation) = match &m {
+            Some(m) => ([m[3], m[7], m[11]], matrix_rotation(m)),
+            None => ([0.0; 3], [0.0, 0.0, 0.0, 1.0]),
+        };
+        out.push(PhysPart { shapes: part_shapes(part, &None)?, position, rotation, mass: part.get("m_flMass").and_then(Value::as_f64).unwrap_or(0.0) as f32 });
+    }
     (!out.is_empty()).then_some(out)
+}
+
+fn frame(v: &Value) -> Option<([f32; 3], [f32; 4])> {
+    let a = v.as_array()?;
+    let f = |i: usize| a.get(i).and_then(Value::as_f64).map(|x| x as f32);
+    Some(([f(0)?, f(1)?, f(2)?], [f(4)?, f(5)?, f(6)?, f(7)?]))
+}
+
+/// Joints of a physics tree; types other than twist / swing are skipped.
+pub fn joints(kv: &Value) -> Vec<PhysJoint> {
+    let range = |j: &Value, key: &str, on: &str| -> Option<[f32; 2]> {
+        if !j.get(on).and_then(Value::as_bool).unwrap_or(false) {
+            return None;
+        }
+        let r = j.get(key)?;
+        Some([r.get("m_flMin")?.as_f64()? as f32, r.get("m_flMax")?.as_f64()? as f32])
+    };
+    kv.get("m_joints")
+        .and_then(Value::as_array)
+        .unwrap_or(&[])
+        .iter()
+        .filter(|j| j.get("m_nType").and_then(Value::as_i64) == Some(4))
+        .filter_map(|j| {
+            Some(PhysJoint {
+                body1: j.get("m_nBody1")?.as_i64()? as usize,
+                body2: j.get("m_nBody2")?.as_i64()? as usize,
+                frame1: frame(j.get("m_Frame1")?)?,
+                frame2: frame(j.get("m_Frame2")?)?,
+                swing: range(j, "m_SwingLimit", "m_bEnableSwingLimit").map(|r| r[1]),
+                twist: range(j, "m_TwistLimit", "m_bEnableTwistLimit"),
+                collide: j.get("m_bEnableCollision").and_then(Value::as_bool).unwrap_or(false),
+            })
+        })
+        .collect()
+}
+
+/// The physics tree of a model: its embedded `PHYS` block, else the first referenced `vphys_c` that has parts.
+pub fn tree(model: &Resource, model_kv: &Value, read: &dyn Fn(&str) -> Option<Vec<u8>>) -> Option<Value> {
+    let has_parts = |kv: &Value| kv.get("m_parts").and_then(Value::as_array).is_some_and(|p| !p.is_empty());
+    if let Some(kv) = model.block_data("PHYS").and_then(|b| kv3::parse(b).ok()).filter(has_parts) {
+        return Some(kv);
+    }
+    for r in model_kv.get("m_refPhysicsData").and_then(Value::as_array).unwrap_or(&[]) {
+        let Some(path) = r.as_str() else { continue };
+        let path = if path.ends_with("_c") { path.to_string() } else { format!("{path}_c") };
+        let Some(data) = read(&path) else { continue };
+        let Ok(res) = Resource::parse(&data) else { continue };
+        if let Some(kv) = res.block_data("DATA").and_then(|b| kv3::parse(b).ok()).filter(has_parts) {
+            return Some(kv);
+        }
+    }
+    None
+}
+
+/// Parts and joints of a model that has jointed physics (a ragdoll), `None` otherwise.
+pub fn ragdoll(model: &Resource, model_kv: &Value, read: &dyn Fn(&str) -> Option<Vec<u8>>) -> Option<(Vec<PhysPart>, Vec<PhysJoint>)> {
+    let kv = tree(model, model_kv, read)?;
+    let joints = joints(&kv);
+    let parts = parts(&kv)?;
+    let valid = joints.iter().all(|j| j.body1 < parts.len() && j.body2 < parts.len());
+    (!joints.is_empty() && valid).then_some((parts, joints))
 }
 
 /// Collision shapes of a model: its embedded `PHYS` block first, then the referenced `vphys_c` files.
@@ -128,6 +258,32 @@ mod tests {
         let kv = obj(vec![("m_parts", Value::Array(vec![obj(vec![("m_rnShape", shape)])]))]);
         let s = shapes(&kv).unwrap();
         assert_eq!(s, vec![PhysShape::Mesh { vertices: vec![[0., 0., 0.], [1., 0., 0.], [0., 1., 0.]], indices: vec![[0, 1, 2]] }]);
+    }
+
+    #[test]
+    fn parts_keep_their_own_space_and_joints_are_read() {
+        let sphere = obj(vec![("m_rnShape", obj(vec![("m_spheres", Value::Array(vec![obj(vec![("m_Sphere", obj(vec![("m_vCenter", v3(5., 0., 0.)), ("m_flRadius", d(1.))]))])]))])), ("m_flMass", d(3.))]);
+        // Rotated 90 degrees about Z, moved to (1, 2, 3).
+        let rot = Value::Array([0.0, -1.0, 0.0, 1.0, 1.0, 0.0, 0.0, 2.0, 0.0, 0.0, 1.0, 3.0].iter().map(|&x| d(x)).collect());
+        let frame = Value::Array([1., 2., 3., 1., 0., 0., 0., 1.].iter().map(|&x| d(x)).collect());
+        let joint = |ty: i64| obj(vec![
+            ("m_nType", Value::Int(ty)), ("m_nBody1", Value::Int(0)), ("m_nBody2", Value::Int(1)),
+            ("m_Frame1", frame.clone()), ("m_Frame2", frame.clone()), ("m_bEnableCollision", Value::Bool(false)),
+            ("m_bEnableSwingLimit", Value::Bool(true)), ("m_SwingLimit", obj(vec![("m_flMin", d(0.)), ("m_flMax", d(0.5))])),
+            ("m_bEnableTwistLimit", Value::Bool(false)), ("m_TwistLimit", obj(vec![("m_flMin", d(-1.)), ("m_flMax", d(1.))])),
+        ]);
+        let kv = obj(vec![("m_parts", Value::Array(vec![sphere.clone(), sphere])), ("m_bindPose", Value::Array(vec![rot.clone(), rot])), ("m_joints", Value::Array(vec![joint(4), joint(2)]))]);
+        let p = parts(&kv).unwrap();
+        assert_eq!(p.len(), 2);
+        assert_eq!(p[0].shapes, vec![PhysShape::Sphere { center: [5.0, 0.0, 0.0], radius: 1.0 }], "shapes stay in the part's space");
+        assert_eq!(p[0].position, [1.0, 2.0, 3.0]);
+        assert_eq!(p[0].mass, 3.0);
+        let h = std::f32::consts::FRAC_1_SQRT_2;
+        assert!((p[0].rotation[2] - h).abs() < 1e-5 && (p[0].rotation[3] - h).abs() < 1e-5, "90 degrees about Z, got {:?}", p[0].rotation);
+        let j = joints(&kv);
+        assert_eq!(j.len(), 1, "only the twist / swing joint is kept");
+        assert_eq!((j[0].body1, j[0].body2, j[0].swing, j[0].twist, j[0].collide), (0, 1, Some(0.5), None, false));
+        assert_eq!(j[0].frame1, ([1.0, 2.0, 3.0], [0.0, 0.0, 0.0, 1.0]));
     }
 
     #[test]

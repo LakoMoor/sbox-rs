@@ -293,6 +293,13 @@ impl Value {
             None
         }
     }
+    pub fn as_bool(&self) -> Option<bool> {
+        if let Value::Bool(b) = self {
+            Some(*b)
+        } else {
+            None
+        }
+    }
     pub fn as_f64(&self) -> Option<f64> {
         match self {
             Value::Double(d) => Some(*d),

@@ -40,6 +40,55 @@ impl LoadedModel {
     }
 }
 
+/// Turn physics parts into dynamic bodies at `root` + their rest pose, tied together by twist / swing joints. Returns one
+/// object per part. Only the collision shapes exist: the bodies are not drawn and no skeleton follows them yet.
+pub fn spawn_ragdoll(scene: &mut Scene, root: &Transform, parts: &[sbox_resource::phys::PhysPart], joints: &[sbox_resource::phys::PhysJoint]) -> Vec<sbox_scene::GoId> {
+    use sbox_math::Quat;
+    use sbox_resource::phys::PhysShape;
+    let v = |a: &[f32; 3]| Vec3::from(*a);
+    let bodies: Vec<_> = parts
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let go = scene.create_object(&format!("ragdoll_part_{i}"));
+            let local = Transform::new(v(&p.position), Quat::from_xyzw(p.rotation[0], p.rotation[1], p.rotation[2], p.rotation[3]), Vec3::ONE);
+            scene.set_local_transform(go, Transform::new(root.position + root.rotation * (local.position * root.scale), root.rotation * local.rotation, root.scale));
+            scene.add_component(go, Rigidbody { mass_override: (p.mass > 0.0).then_some(p.mass), ..Default::default() });
+            let shapes = p
+                .shapes
+                .iter()
+                .map(|s| match s {
+                    PhysShape::Hull(h) => Shape::Hull(h.iter().map(v).collect()),
+                    PhysShape::Sphere { center, radius } => Shape::Sphere { center: v(center), radius: *radius },
+                    PhysShape::Capsule { a, b, radius } => Shape::Capsule { a: v(a), b: v(b), radius: *radius },
+                    PhysShape::Mesh { vertices, indices } => Shape::TriMesh { vertices: vertices.iter().map(v).collect(), indices: indices.clone() },
+                })
+                .collect();
+            scene.add_component(go, Collider { shape: Shape::Compound(shapes), is_trigger: false });
+            go
+        })
+        .collect();
+    // A body can carry only one `Joint` component, so extra joints of the same body hang off child helper objects.
+    for j in joints {
+        let q = |f: &([f32; 3], [f32; 4])| Transform::new(v(&f.0), Quat::from_xyzw(f.1[0], f.1[1], f.1[2], f.1[3]), Vec3::ONE);
+        let owner = if scene.component::<sbox_physics::Joint>(bodies[j.body1]).is_none() {
+            bodies[j.body1]
+        } else {
+            scene.create_object_in(Some(bodies[j.body1]), "ragdoll_joint")
+        };
+        let joint = sbox_physics::Joint {
+            other: bodies[j.body2],
+            frame1: q(&j.frame1),
+            frame2: q(&j.frame2),
+            swing_limit: j.swing,
+            twist_limit: j.twist,
+            collide: j.collide,
+        };
+        scene.add_component(owner, joint);
+    }
+    bodies
+}
+
 pub struct Assets {
     pub fs: Option<vmat::GameFs>,
     models: HashMap<String, Option<Rc<LoadedModel>>>,
@@ -709,4 +758,40 @@ fn find_vtex_path(data: &[u8]) -> Option<String> {
     let end = data.windows(5).position(|w| w == b".vtex")? + 5;
     let start = data[..end].iter().rposition(|&b| b == 0 || b < 32).map_or(0, |i| i + 1);
     std::str::from_utf8(&data[start..end]).ok().map(|p| p.replace('\\', "/"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sbox_resource::phys::{PhysJoint, PhysPart, PhysShape};
+
+    #[test]
+    fn a_ragdoll_falls_as_a_connected_chain() {
+        let mut scene = Scene::new();
+        sbox_physics::Physics::install(&mut scene);
+        let ground = scene.create_object("ground");
+        scene.add_component(ground, Collider { shape: Shape::Plane, is_trigger: false });
+        // Three capsule parts stacked 40 units apart, each joined to the next at the shared point; both joints come from the
+        // middle part, so one of them hangs off a helper object.
+        let part = |z: f32| PhysPart { shapes: vec![PhysShape::Capsule { a: [0.0, 0.0, -10.0], b: [0.0, 0.0, 10.0], radius: 5.0 }], position: [0.0, 0.0, z], rotation: [0.0, 0.0, 0.0, 1.0], mass: 5.0 };
+        let frame = |z: f32| ([0.0, 0.0, z], [0.0, 0.0, 0.0, 1.0]);
+        let joint = |a: usize, b: usize| PhysJoint { body1: a, body2: b, frame1: frame(20.0), frame2: frame(-20.0), swing: Some(1.0), twist: Some([-0.5, 0.5]), collide: false };
+        let bodies = spawn_ragdoll(&mut scene, &Transform::from_position(Vec3::new(0.0, 0.0, 300.0)), &[part(0.0), part(40.0), part(80.0)], &[joint(1, 2), joint(1, 0)]);
+        assert_eq!(bodies.len(), 3);
+        assert_eq!(scene.iter_components::<sbox_physics::Joint>().count(), 2);
+        for _ in 0..250 {
+            scene.tick(1.0 / 50.0);
+        }
+        let p: Vec<Vec3> = bodies.iter().map(|&b| scene.world_transform(b).position).collect();
+        assert!(p.iter().all(|p| p.z < 300.0), "gravity moved every part: {p:?}");
+        // The shared joint points stay together: part 1's +20 meets part 2's -20 (and part 1's +20 meets part 0's -20).
+        for (a, b) in [(1usize, 2usize), (1, 0)] {
+            let at = |go: sbox_scene::GoId, z: f32| {
+                let t = scene.world_transform(go);
+                t.position + t.rotation * Vec3::new(0.0, 0.0, z)
+            };
+            let (pa, pb) = (at(bodies[a], 20.0), at(bodies[b], -20.0));
+            assert!((pa - pb).length() < 4.0, "joint {a}-{b} came apart by {}", (pa - pb).length());
+        }
+    }
 }

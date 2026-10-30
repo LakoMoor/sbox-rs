@@ -112,6 +112,24 @@ impl Shape {
     }
 }
 
+/// A ball-and-socket joint (Source 2 "twist/swing", `m_nType` 4) between this object's rigid body and `other`'s. The
+/// frames are the joint position and orientation in each body's local space; the first frame's local X axis is the twist
+/// axis. Both objects need a [`Rigidbody`] (and usually a [`Collider`]); the joint is created once both exist.
+pub struct Joint {
+    pub other: GoId,
+    pub frame1: Transform,
+    pub frame2: Transform,
+    /// Largest angle between the two twist axes in radians; `None` leaves the swing free.
+    pub swing_limit: Option<f32>,
+    /// Allowed twist about the axis, `[min, max]` in radians; `None` leaves it free.
+    pub twist_limit: Option<[f32; 2]>,
+    /// Whether the two bodies collide with each other (ragdoll parts do not).
+    pub collide: bool,
+}
+impl Component for Joint {
+    impl_component_any!();
+}
+
 /// `BoxCollider` / `SphereCollider` / `PlaneCollider`.
 pub struct Collider {
     pub shape: Shape,
@@ -139,6 +157,7 @@ pub struct Physics {
     body_of: HashMap<GoId, RigidBodyHandle>,
     registered: std::collections::HashSet<GoId>,
     players: Vec<GoId>,
+    jointed: std::collections::HashSet<GoId>,
 }
 
 impl Default for Physics {
@@ -159,6 +178,7 @@ impl Default for Physics {
             body_of: HashMap::new(),
             registered: Default::default(),
             players: Vec::new(),
+            jointed: Default::default(),
         }
     }
 }
@@ -271,6 +291,30 @@ impl Physics {
         }
     }
 
+    /// Create the rapier joints for [`Joint`] components whose two bodies both exist now.
+    fn register_joints(&mut self, scene: &Scene) {
+        let todo: Vec<GoId> = scene.iter_components::<Joint>().map(|(go, _)| go).filter(|g| !self.jointed.contains(g)).collect();
+        for go in todo {
+            let Some(j) = scene.component::<Joint>(go) else { continue };
+            // The joint may sit on a child object of the body (several joints of one body).
+            let body = |g: GoId| Self::rigidbody_owner(scene, g).and_then(|o| self.body_of.get(&o).copied());
+            let (Some(b1), Some(b2)) = (body(go), body(j.other)) else { continue };
+            self.jointed.insert(go);
+            let mut builder = GenericJointBuilder::new(JointAxesMask::LOCKED_SPHERICAL_AXES)
+                .local_frame1(iso(&Transform::new(j.frame1.position, j.frame1.rotation, Vec3::ONE)))
+                .local_frame2(iso(&Transform::new(j.frame2.position, j.frame2.rotation, Vec3::ONE)))
+                .contacts_enabled(j.collide);
+            // The frames' X axes are the twist axes: AngX is the twist, AngY / AngZ the swing about the other two.
+            if let Some(t) = j.twist_limit {
+                builder = builder.limits(JointAxis::AngX, t);
+            }
+            if let Some(s) = j.swing_limit {
+                builder = builder.limits(JointAxis::AngY, [-s, s]).limits(JointAxis::AngZ, [-s, s]);
+            }
+            self.impulse_joints.insert(b1, b2, builder.build(), true);
+        }
+    }
+
     fn drive_players(&mut self, scene: &mut Scene) {
         if self.players.is_empty() {
             return;
@@ -319,6 +363,7 @@ impl Physics {
             return;
         }
         self.register_new(scene);
+        self.register_joints(scene);
         self.drive_players(scene);
         // Kinematic bodies are placed by the game: carry their object's transform into the simulation.
         for (&go, &h) in &self.body_of {
@@ -433,6 +478,39 @@ mod tests {
         }
         let z = scene.world_transform(ball).position.z;
         assert!((z - 20.0).abs() < 1.5, "ball should rest on the mesh at z=20, got {z}");
+    }
+
+    #[test]
+    fn a_joint_keeps_two_bodies_together_and_limits_the_swing() {
+        let mut scene = Scene::new();
+        Physics::install(&mut scene);
+        let ground = scene.create_object("ground");
+        scene.add_component(ground, Collider { shape: Shape::Plane, is_trigger: false });
+        // A fixed anchor high up and a heavy ball hanging from it by a 100-unit "arm", pinned at the anchor.
+        let anchor = scene.create_object("anchor");
+        scene.set_local_transform(anchor, Transform::from_position(Vec3::new(0.0, 0.0, 300.0)));
+        scene.add_component(anchor, Rigidbody { motion_enabled: false, ..Default::default() });
+        scene.add_component(anchor, Collider { shape: Shape::Sphere { center: Vec3::ZERO, radius: 5.0 }, is_trigger: false });
+        let ball = scene.create_object("ball");
+        scene.set_local_transform(ball, Transform::from_position(Vec3::new(100.0, 0.0, 300.0)));
+        scene.add_component(ball, Rigidbody::default());
+        scene.add_component(ball, Collider { shape: Shape::Sphere { center: Vec3::ZERO, radius: 10.0 }, is_trigger: false });
+        scene.add_component(anchor, Joint {
+            other: ball,
+            frame1: Transform::from_position(Vec3::ZERO),
+            frame2: Transform::from_position(Vec3::new(-100.0, 0.0, 0.0)),
+            swing_limit: None,
+            twist_limit: None,
+            collide: false,
+        });
+        for _ in 0..300 {
+            scene.tick(1.0 / 50.0);
+        }
+        let p = scene.world_transform(ball).position;
+        // The ball swings like a pendulum: it stays 100 units from the anchor and has fallen below it.
+        let dist = (p - Vec3::new(0.0, 0.0, 300.0)).length();
+        assert!((dist - 100.0).abs() < 3.0, "distance to the pin should stay 100, got {dist}");
+        assert!(p.z < 300.0, "gravity pulls the ball down, z={}", p.z);
     }
 
     #[test]

@@ -106,6 +106,8 @@ pub struct Model {
     pub default_group_mask: i64,
     /// Collision shapes in model space (`None` when the model has none or only skeletal physics).
     pub physics: Option<Vec<crate::phys::PhysShape>>,
+    /// Physics parts and the joints between them, for models that can be a ragdoll.
+    pub ragdoll: Option<(Vec<crate::phys::PhysPart>, Vec<crate::phys::PhysJoint>)>,
 }
 
 impl Model {
@@ -177,5 +179,6 @@ pub fn load_with(file: &[u8], read: &dyn Fn(&str) -> Option<Vec<u8>>) -> Result<
         });
     }
     model.physics = crate::phys::load(&res, &kv, read);
+    model.ragdoll = crate::phys::ragdoll(&res, &kv, read);
     Ok(model)
 }
