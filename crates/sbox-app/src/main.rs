@@ -833,9 +833,17 @@ impl ApplicationHandler for App {
             let out = args.get(i + 1).expect("--screenshot <file.png>");
             let secs: f32 = args.iter().position(|a| a == "--time").and_then(|j| args.get(j + 1)).and_then(|v| v.parse().ok()).unwrap_or(1.0);
             let (w, h) = (1280, 720);
+            // With a network session the loop runs in real time and pumps it, so a screenshot can show what arrived.
+            let networked = self.net.is_some();
+            self.renderer = Some(renderer);
             for _ in 0..(secs * 60.0) as u32 {
                 self.scene.tick(1.0 / 60.0);
+                if networked {
+                    self.pump_net(1.0 / 60.0);
+                    std::thread::sleep(std::time::Duration::from_millis(16));
+                }
             }
+            let mut renderer = self.renderer.take().expect("renderer");
             let flag = |name: &str| args.iter().position(|a| a == name).and_then(|j| args.get(j + 1)).and_then(|v| v.parse::<f32>().ok());
             // `--cam-zoom <k>` moves the camera k times closer to the point it looks at (the model centre, or `--cam-target x y z`).
             if let (Some(c), Some(k)) = (self.camera, flag("--cam-zoom")) {
