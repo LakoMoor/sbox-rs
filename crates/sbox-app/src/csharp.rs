@@ -11,6 +11,8 @@ type Values = HashMap<String, String>;
 pub enum Stmt {
     /// `name op= expr` where op is `=`, `+` or `-`.
     Assign { name: String, op: char, expr: Expr },
+    /// `Log.Info(expr)` / `Log.Warning(expr)` / `Log.Error(expr)`.
+    Log { level: log::Level, expr: Expr },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -87,6 +89,11 @@ fn expr(s: &str) -> Option<Expr> {
 
 fn statement(s: &str) -> Option<Stmt> {
     let s = s.trim();
+    for (call, level) in [("Log.Info(", log::Level::Info), ("Log.Warning(", log::Level::Warn), ("Log.Error(", log::Level::Error)] {
+        if let Some(arg) = s.strip_prefix(call).and_then(|r| r.strip_suffix(')')) {
+            return Some(Stmt::Log { level, expr: expr(arg)? });
+        }
+    }
     if let Some(n) = s.strip_suffix("++").map(str::trim).filter(|n| is_ident(n)) {
         return Some(Stmt::Assign { name: n.to_string(), op: '+', expr: Expr::Lit("1".into()) });
     }
@@ -232,7 +239,14 @@ pub fn eval(e: &Expr, v: &Values) -> String {
 
 /// Run a method's statements against the page values.
 pub fn run(stmts: &[Stmt], v: &mut Values) {
-    for Stmt::Assign { name, op, expr } in stmts {
+    for stmt in stmts {
+        let (name, op, expr) = match stmt {
+            Stmt::Log { level, expr } => {
+                log::log!(*level, "razor: {}", eval(expr, v));
+                continue;
+            }
+            Stmt::Assign { name, op, expr } => (name, op, expr),
+        };
         let rhs = eval(expr, v);
         let new = match op {
             '=' => rhs,
@@ -258,6 +272,7 @@ mod tests {
         void Add() { Count += 2; Open = true; }
         string Label => $"Count is {Count}!";
         int Next => Count + 1;
+        void Noisy() { Log.Info($"c={Count}"); Count++; }
         void Fancy() { Foo(); }
         void WithArg(int x) { Count = x; }
     "#;
@@ -269,7 +284,7 @@ mod tests {
         assert_eq!(names, ["Count=3", "Open=false", "Title=Hi", "Show=true"], "an auto-property with an initialiser is a field too");
         let mut m: Vec<_> = p.methods.keys().cloned().collect();
         m.sort();
-        assert_eq!(m, ["Add", "Increment", "Reset", "Toggle"], "calls and parameters are not supported");
+        assert_eq!(m, ["Add", "Increment", "Noisy", "Reset", "Toggle"], "calls and parameters are not supported");
         let mut v: Values = p.fields.iter().cloned().collect();
         let got: Vec<_> = p.computed.iter().map(|(n, e)| format!("{n}={}", eval(e, &v))).collect();
         assert_eq!(got, ["Label=Count is 3!", "Next=4"]);
