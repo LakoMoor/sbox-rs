@@ -314,6 +314,58 @@ mod tests {
         assert_eq!(p.values["Summary"], "6,12,18");
     }
 
+    /// Over the shipped pages: how many `@code` blocks compile in the embedded .NET, and which names the failures lack.
+    #[test]
+    fn shipped_pages_compile_against_the_engine_stubs() {
+        fn walk(d: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            let Ok(rd) = std::fs::read_dir(d) else { return };
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, out)
+                } else if p.extension().is_some_and(|x| x == "razor") {
+                    out.push(p)
+                }
+            }
+        }
+        let game = std::path::Path::new("E:/sbox-ref/game");
+        if !game.exists() || !std::path::Path::new("C:/Program Files/dotnet").exists() || !std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../sbox-dotnet/managed/bin/SboxHost.dll").exists() {
+            return;
+        }
+        crate::dotnet::enable();
+        let Some(rt) = crate::dotnet::get() else { return };
+        let mut files = Vec::new();
+        walk(game, &mut files);
+        let (mut total, mut ok) = (0, 0);
+        let mut missing: HashMap<String, usize> = HashMap::new();
+        for f in files {
+            let Some(code) = crate::razor::parse(&std::fs::read_to_string(&f).unwrap_or_default()).ok().and_then(|d| d.code) else { continue };
+            total += 1;
+            match rt.load(&code) {
+                Ok(_) => ok += 1,
+                Err(e) => {
+                    let mut seen = std::collections::HashSet::new();
+                    for l in e.to_string().lines() {
+                        if let Some(a) = l.find('"') {
+                            if let Some(b) = l[a + 1..].find('"') {
+                                if l.contains("CS0246") || l.contains("CS0103") || l.contains("CS0117") || l.contains("CS1061") {
+                                    seen.insert(l[a + 1..a + 1 + b].to_string());
+                                }
+                            }
+                        }
+                    }
+                    for n in seen {
+                        *missing.entry(n).or_default() += 1;
+                    }
+                }
+            }
+        }
+        let mut top: Vec<_> = missing.into_iter().collect();
+        top.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        eprintln!("shipped pages compiled by .NET: {ok} of {total}; most missing names: {:?}", &top[..top.len().min(40)]);
+        assert!(total > 100);
+    }
+
     #[test]
     fn clicks_run_game_code_that_changes_the_values() {
         let mut p = page("<root><button onclick=@Increment>+</button>@Count</root>");

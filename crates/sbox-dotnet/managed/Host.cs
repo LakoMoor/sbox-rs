@@ -12,6 +12,7 @@ public static unsafe class Host
     static readonly List<Type> Pages = new();
     static readonly List<object> Instances = new();
     static string last = "";
+    static readonly string StubSource = new StreamReader(typeof(Host).Assembly.GetManifestResourceStream("Engine.stub.cs")!).ReadToEnd();
 
     static string Str(byte* p, int n) => Encoding.UTF8.GetString(p, n);
 
@@ -29,14 +30,14 @@ public static unsafe class Host
     {
         try
         {
-            var src = "using System; using System.Collections.Generic; using System.Linq;\n" +
+            var src = "using System; using System.Collections.Generic; using System.Linq; using System.Threading.Tasks;\n" +
                       "public static class Log { public static List<string> Lines = new(); public static void Info(object o) => Lines.Add(\"info: \" + o); public static void Warning(object o) => Lines.Add(\"warn: \" + o); public static void Error(object o) => Lines.Add(\"error: \" + o); }\n" +
-                      "public class PageCode {\n" + Str(code, len) + "\n}";
+                      "public class PageCode : PanelComponent {\n" + Str(code, len) + "\n}";
             var refs = ((string)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES")!).Split(Path.PathSeparator)
                 .Select(p => MetadataReference.CreateFromFile(p)).Cast<MetadataReference>().ToList();
             refs.Add(MetadataReference.CreateFromFile(typeof(Host).Assembly.Location));
             var comp = CSharpCompilation.Create("page" + Pages.Count,
-                new[] { CSharpSyntaxTree.ParseText(src) }, refs,
+                new[] { CSharpSyntaxTree.ParseText(src), CSharpSyntaxTree.ParseText(StubSource) }, refs,
                 new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary, nullableContextOptions: NullableContextOptions.Disable));
             using var ms = new MemoryStream();
             var res = comp.Emit(ms);

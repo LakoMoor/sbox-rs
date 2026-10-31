@@ -7,6 +7,8 @@
     <RoslynDir Condition="'$(RoslynDir)'==''">$(NetCoreTargetingPackRoot)/../sdk/$(NETCoreSdkVersion)/Roslyn/bincore</RoslynDir>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Remove="Engine.stub.cs" />
+    <EmbeddedResource Include="Engine.stub.cs" LogicalName="Engine.stub.cs" />
     <Reference Include="Microsoft.CodeAnalysis"><HintPath>$(RoslynDir)/Microsoft.CodeAnalysis.dll</HintPath></Reference>
     <Reference Include="Microsoft.CodeAnalysis.CSharp"><HintPath>$(RoslynDir)/Microsoft.CodeAnalysis.CSharp.dll</HintPath></Reference>
   </ItemGroup>
