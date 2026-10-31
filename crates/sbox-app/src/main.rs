@@ -518,7 +518,11 @@ impl App {
     /// Per-frame networking: the host handles clients and broadcasts props, a client applies the latest snapshot.
     fn pump_net(&mut self, dt: f32) {
         use sbox_net::rpc::Arg;
-        let spawn = self.camera.map_or(Vec3::Z * 64.0, |c| self.scene.world_transform(c).position);
+        let mut spawn = self.camera.map_or(Vec3::Z * 64.0, |c| self.scene.world_transform(c).position);
+        // `--spawn-z <z>` (host) drops new players to that height, e.g. to walk into the demo props.
+        if let Some(z) = std::env::args().position(|a| a == "--spawn-z").and_then(|i| std::env::args().nth(i + 1)).and_then(|v| v.parse::<f32>().ok()) {
+            spawn.z = z;
+        }
         match &mut self.net {
             Some(Net::Host(server, players)) => {
                 for e in server.poll() {
