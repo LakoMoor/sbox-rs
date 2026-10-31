@@ -331,6 +331,12 @@ impl Physics {
         }
     }
 
+    /// Linear velocity of the body of `go`.
+    pub fn body_velocity(&self, go: GoId) -> Option<Vec3> {
+        let v = self.bodies.get(*self.body_of.get(&go)?)?.linvel();
+        Some(Vec3::new(v.x, v.y, v.z))
+    }
+
     /// Where the body of `go` is now (the scene transform only follows after the next step).
     pub fn body_position(&self, go: GoId) -> Option<Vec3> {
         let t = self.bodies.get(*self.body_of.get(&go)?)?.translation();

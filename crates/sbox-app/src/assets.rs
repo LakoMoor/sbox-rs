@@ -799,6 +799,13 @@ impl Assets {
                 if e.classname() == "prop_physics" && e.bool("motiondisabled") != Some(true) {
                     scene.add_component(go, Rigidbody::default());
                 }
+                if e.classname() == "func_shatterglass" {
+                    // Bounds are axis-aligned in world space only for unrotated panes; the margin in `shatter::breaks` absorbs the rest.
+                    let half = (m.maxs - m.mins) * 0.5 * transform.scale;
+                    let shard_mesh = r.upload_mesh(&MeshData::cuboid(Vec3::splat(8.0)));
+                    let shard_material = m.parts.first().map_or(MaterialId(0), |p| p.1);
+                    scene.add_component(go, crate::shatter::Shatterable { half, min_speed: 150.0, shard_mesh, shard_material, shard_size: 8.0 });
+                }
                 info.props += 1;
             }
             _ => {}

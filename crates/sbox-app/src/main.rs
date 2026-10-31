@@ -7,6 +7,7 @@ mod layout;
 mod meshcomp;
 mod page;
 mod props;
+mod shatter;
 mod worldpanel;
 #[allow(dead_code)]
 mod razor;
