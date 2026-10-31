@@ -184,6 +184,25 @@ struct WorldPanelState {
     font: ab_glyph::FontVec,
 }
 
+/// `--glass-demo`: throws its ball at the pane after a moment.
+struct GlassBall {
+    launched: bool,
+}
+
+impl Component for GlassBall {
+    fn on_update(&mut self, scene: &mut Scene, h: Handle) {
+        if !self.launched && scene.time > 0.3 {
+            self.launched = true;
+            let go = h.go;
+            scene.with_resource::<sbox_physics::Physics, _>(|p, s| {
+                let at = s.world_transform(go).position;
+                p.set_body_state(s, go, at, Some(Vec3::new(500.0, 0.0, 0.0)));
+            });
+        }
+    }
+    impl_component_any!();
+}
+
 /// Simple fly camera: WASD + QE, arrow keys to look.
 #[derive(Default)]
 struct FlyCamera {
@@ -315,6 +334,29 @@ impl App {
             } else {
                 scene.add_component(go, Spinner { speed: 30.0 + 20.0 * i as f32 });
             }
+        }
+
+        // `--glass-demo`: a pane in front of the camera and a fast ball flying into it (see `shatter.rs`).
+        if std::env::args().any(|a| a == "--glass-demo") {
+            sbox_physics::Physics::install(scene);
+            scene.resource_mut::<sbox_physics::Physics>().map(|p| p.gravity = Vec3::ZERO);
+            let pane_mesh = r.upload_mesh(&MeshData::cuboid(Vec3::new(8.0, 160.0, 120.0)));
+            let pane_mat = r.create_material_ex(&sbox_render::MaterialDesc { tint: [0.5, 0.8, 0.9, 0.35], translucent: true, roughness: 0.1, ..Default::default() });
+            let pane = scene.create_object("glass_pane");
+            scene.set_local_transform(pane, Transform::from_position(Vec3::new(150.0, 0.0, 120.0)));
+            let mut m = ModelRenderer::new(pane_mesh);
+            m.material = pane_mat;
+            scene.add_component(pane, m);
+            let shard_mesh = r.upload_mesh(&MeshData::cuboid(Vec3::splat(8.0)));
+            scene.add_component(pane, shatter::Shatterable { half: Vec3::new(4.0, 80.0, 60.0), min_speed: 150.0, shard_mesh, shard_material: pane_mat, shard_size: 8.0 });
+            let ball_go = scene.create_object("glass_ball");
+            scene.set_local_transform(ball_go, Transform::from_position(Vec3::new(-100.0, 0.0, 120.0)));
+            let mut bm = ModelRenderer::new(ball);
+            bm.tint = [0.9, 0.3, 0.2, 1.0];
+            scene.add_component(ball_go, bm);
+            scene.add_component(ball_go, sbox_physics::Rigidbody::default());
+            scene.add_component(ball_go, sbox_physics::Collider { shape: sbox_physics::Shape::Sphere { center: Vec3::ZERO, radius: 32.0 }, is_trigger: false });
+            scene.add_component(ball_go, GlassBall { launched: false });
         }
 
         let sun = scene.create_object("sun");
