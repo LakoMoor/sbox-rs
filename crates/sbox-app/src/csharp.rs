@@ -297,7 +297,7 @@ mod tests {
         }
         let mut files = Vec::new();
         walk(game, &mut files);
-        let (mut with_code, mut with_methods, mut fields, mut methods, mut fully) = (0, 0, 0, 0, 0);
+        let (mut with_code, mut with_methods, mut fields, mut methods, mut fully, mut computed) = (0, 0, 0, 0, 0, 0);
         for f in files {
             let Some(code) = crate::razor::parse(&std::fs::read_to_string(&f).unwrap_or_default()).ok().and_then(|d| d.code) else { continue };
             with_code += 1;
@@ -305,6 +305,7 @@ mod tests {
             let declared = code.matches("void ").count();
             fields += p.fields.len();
             methods += p.methods.len();
+            computed += p.computed.len();
             with_methods += (!p.methods.is_empty()) as usize;
             fully += (declared > 0 && declared == p.methods.len()) as usize;
             let mut v: Values = p.fields.iter().cloned().collect();
@@ -312,7 +313,7 @@ mod tests {
                 run(m, &mut v);
             }
         }
-        eprintln!("shipped pages: {with_code} with code, {with_methods} with a runnable method, {fields} fields, {methods} methods, {fully} where every void method is supported");
+        eprintln!("shipped pages: {with_code} with code, {with_methods} with a runnable method, {fields} fields, {methods} methods, {fully} where every void method is supported, {computed} computed properties");
         assert!(with_code > 100, "the shipped pages were found");
     }
 
