@@ -405,11 +405,11 @@ impl App {
 
     /// A click at the cursor: if it lands on a button of the world panel, run the handler and redraw the panel.
     /// Returns whether the click was used.
-    fn click_world_panel(&mut self) -> bool {
-        let (Some(wp), Some(cam), Some(r), Some(w)) = (&mut self.world_panel, self.camera, &mut self.renderer, &self.window) else { return false };
+    fn click_world_panel(&mut self, viewport: Option<(f32, f32)>) -> bool {
+        let (Some(wp), Some(cam), Some(r)) = (&mut self.world_panel, self.camera, &mut self.renderer) else { return false };
         let fov = self.scene.component::<CameraComponent>(cam).map_or(60.0, |c| c.field_of_view);
-        let sz = w.inner_size();
-        let (origin, dir) = worldpanel::camera_ray(&self.scene.world_transform(cam), fov, sz.width as f32, sz.height as f32, self.cursor.0, self.cursor.1);
+        let Some((vw, vh)) = viewport.or_else(|| self.window.as_ref().map(|w| (w.inner_size().width as f32, w.inner_size().height as f32))) else { return false };
+        let (origin, dir) = worldpanel::camera_ray(&self.scene.world_transform(cam), fov, vw, vh, self.cursor.0, self.cursor.1);
         let Some([u, v]) = worldpanel::panel_uv(&self.scene.world_transform(wp.go), wp.size, origin, dir) else { return false };
         let Some(id) = worldpanel::hit_button(&wp.items, u * wp.pixels.0 as f32, v * wp.pixels.1 as f32).map(String::from) else { return false };
         log::info!("world panel: clicked {id}");
@@ -868,6 +868,15 @@ impl ApplicationHandler for App {
                 }
             }
             let mut renderer = self.renderer.take().expect("renderer");
+            self.renderer = Some(renderer);
+            // `--click <x> <y>` presses the left button at that window pixel (a world panel button, say) before the shot.
+            if let Some(i) = args.iter().position(|a| a == "--click") {
+                let g = |o: usize| args.get(i + o).and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.0);
+                self.cursor = (g(1), g(2));
+                let used = self.click_world_panel(Some((1280.0, 720.0)));
+                log::info!("click at {:?}: used = {used}", self.cursor);
+            }
+            let mut renderer = self.renderer.take().expect("renderer");
             let flag = |name: &str| args.iter().position(|a| a == name).and_then(|j| args.get(j + 1)).and_then(|v| v.parse::<f32>().ok());
             // `--cam-zoom <k>` moves the camera k times closer to the point it looks at (the model centre, or `--cam-target x y z`).
             if let (Some(c), Some(k)) = (self.camera, flag("--cam-zoom")) {
@@ -1103,7 +1112,7 @@ impl ApplicationHandler for App {
                     }
                     return;
                 }
-                if self.click_world_panel() {
+                if self.click_world_panel(None) {
                     return;
                 }
                 if let (Some(w), Some(input)) = (&self.window, self.scene.resource_mut::<Input>()) {
