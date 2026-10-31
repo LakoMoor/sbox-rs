@@ -307,7 +307,14 @@ impl App {
             }
             m.tint = [0.3 + 0.15 * i as f32, 0.8 - 0.12 * i as f32, 0.5, 1.0];
             scene.add_component(go, m);
-            scene.add_component(go, Spinner { speed: 30.0 + 20.0 * i as f32 });
+            // `--phys-props` makes them physics props (instead of spinning decorations) so networked pushes can be tried.
+            if std::env::args().any(|a| a == "--phys-props") {
+                scene.add_component(go, sbox_physics::Rigidbody::default());
+                let shape = if i % 2 == 0 { sbox_physics::Shape::Box { center: Vec3::ZERO, size: Vec3::splat(64.0) } } else { sbox_physics::Shape::Sphere { center: Vec3::ZERO, radius: 32.0 } };
+                scene.add_component(go, sbox_physics::Collider { shape, is_trigger: false });
+            } else {
+                scene.add_component(go, Spinner { speed: 30.0 + 20.0 * i as f32 });
+            }
         }
 
         let sun = scene.create_object("sun");
@@ -498,6 +505,12 @@ impl App {
         let (host, join) = (arg("--host"), arg("--join"));
         if host.is_none() && join.is_none() {
             return None;
+        }
+        // The demo scene has no physics world of its own: with `--phys-props` give it one and a floor to rest on.
+        if scene.resource::<sbox_physics::Physics>().is_none() && args.iter().any(|a| a == "--phys-props") {
+            sbox_physics::Physics::install(scene);
+            let floor = scene.create_object("demo_floor");
+            scene.add_component(floor, sbox_physics::Collider { shape: sbox_physics::Shape::Plane, is_trigger: false });
         }
         let bodies: Vec<_> = scene.all_objects().filter(|g| scene.component::<sbox_physics::Rigidbody>(*g).is_some()).collect();
         for (i, go) in bodies.into_iter().enumerate() {
