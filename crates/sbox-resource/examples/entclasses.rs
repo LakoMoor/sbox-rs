@@ -20,6 +20,7 @@ fn main() {
         for name in v.entries.keys().filter(|k| k.ends_with(".vents_c")) {
             let Some(d) = v.read(name) else { continue };
             for e in vents::load(&d).unwrap_or_default() {
+                if let Some(w) = a.get(2) { if e.classname() == w { println!("{name}: {}", e.classname()); } }
                 *counts.entry(e.classname().to_string()).or_default() += 1;
             }
         }
