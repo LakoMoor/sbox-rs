@@ -33,13 +33,15 @@ pub struct Page {
     buttons: Range<usize>,
     /// How many scroll areas the UI had before the page added its own.
     areas: usize,
+    /// The page's `@code` compiled by the embedded .NET runtime (`--dotnet`).
+    cs: Option<i32>,
 }
 
 impl Page {
     pub fn new(doc: Document, values: HashMap<String, String>) -> Self {
         let program = doc.code.as_deref().map(crate::csharp::parse);
         let mut values = values;
-        let mut p = Self { doc, values: HashMap::new(), computed: Vec::new(), opacity: 1.0, scale: 1.0, handlers: HashMap::new(), panels: 0..0, labels: 0..0, buttons: 0..0, areas: 0 };
+        let mut p = Self { doc, values: HashMap::new(), computed: Vec::new(), opacity: 1.0, scale: 1.0, handlers: HashMap::new(), panels: 0..0, labels: 0..0, buttons: 0..0, areas: 0, cs: None };
         // Fields of the page's `@code` block give starting values (explicit ones win); its simple methods become handlers.
         if let Some(prog) = program {
             for (k, v) in prog.fields {
@@ -54,6 +56,17 @@ impl Page {
             }
         }
         p.values = values;
+        if let (Some(rt), Some(code)) = (crate::dotnet::get(), p.doc.code.clone()) {
+            match rt.load(&code).and_then(|id| rt.call(id, "", &p.string_values()).map(|r| (id, r))) {
+                Ok((id, r)) => {
+                    p.cs = Some(id);
+                    for (k, v) in r.state {
+                        p.values.entry(k).or_insert(v);
+                    }
+                }
+                Err(e) => log::error!("page code: {e:#}"),
+            }
+        }
         p.register_defaults_if_missing();
         p
     }
@@ -90,8 +103,32 @@ impl Page {
 
     /// Run the handler for a clicked button id. `None` when the page has no handler of that name.
     pub fn click(&mut self, id: &str) -> Option<Effect> {
-        let handler = self.handlers.get_mut(id)?;
+        let Some(handler) = self.handlers.get_mut(id) else {
+            return self.click_csharp(id);
+        };
         Some(handler(&mut self.values))
+    }
+
+    fn string_values(&self) -> std::collections::BTreeMap<String, String> {
+        self.values.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+    }
+
+    /// A button whose handler is a method of the page's original C#: set the values, run it, take the state back.
+    fn click_csharp(&mut self, name: &str) -> Option<Effect> {
+        let (rt, id) = (crate::dotnet::get()?, self.cs?);
+        match rt.call(id, name, &self.string_values()) {
+            Ok(r) => {
+                self.values.extend(r.state);
+                for l in r.log {
+                    log::info!("[{name}] {l}");
+                }
+                Some(Effect::None)
+            }
+            Err(e) => {
+                log::error!("{e:#}");
+                None
+            }
+        }
     }
 
     /// The values with the computed properties evaluated on top (what the markup sees).
@@ -256,6 +293,25 @@ mod tests {
         assert_eq!(texts(&q), ["N=2"]);
         q.click("Up");
         assert_eq!(texts(&q), ["N=3"], "computed properties follow the values");
+    }
+
+    #[test]
+    fn original_csharp_runs_through_the_embedded_runtime() {
+        if !std::path::Path::new("C:/Program Files/dotnet").exists() || !std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../sbox-dotnet/managed/bin/SboxHost.dll").exists() {
+            eprintln!("skipped: no .NET runtime or built SboxHost");
+            return;
+        }
+        crate::dotnet::enable();
+        let mut p = page("<root><button onclick=@Roll>x</button><label>@Summary</label></root>
+@code {
+ int Score = 2;
+ string Summary => string.Join(\",\", new[] { 1, 2, 3 }.Select(x => x * Score));
+ void Roll() { Score = new[] { Score, 5 }.Max() + 1; }
+}");
+        assert_eq!(p.values["Summary"], "2,4,6");
+        assert_eq!(p.click("Roll"), Some(Effect::None));
+        assert_eq!(p.values["Score"], "6");
+        assert_eq!(p.values["Summary"], "6,12,18");
     }
 
     #[test]

@@ -1,0 +1,10 @@
+[package]
+name = "sbox-dotnet"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+netcorehost = { version = "0.22", default-features = false, features = ["net8_0"] }
+anyhow.workspace = true
+log.workspace = true

@@ -1,5 +1,6 @@
 mod assets;
 mod csharp;
+mod dotnet;
 mod audio;
 mod families;
 mod game;
@@ -1202,6 +1203,9 @@ impl ApplicationHandler for App {
 
 fn main() -> anyhow::Result<()> {
     env_logger::init();
+    if std::env::args().any(|a| a == "--dotnet") {
+        dotnet::enable();
+    }
     let el = EventLoop::new()?;
     el.set_control_flow(ControlFlow::Poll);
     let mut app = App { window: None, renderer: None, scene: Scene::new(), camera: None, last: Instant::now(), audio: None, ui: None, ui_font: None, cursor: (0.0, 0.0), net: None, mods: Default::default(), player_mesh: None, clipboard: arboard::Clipboard::new().ok(), dragging: false, page: None, world_panel: None, rpcs: net_rpcs() };

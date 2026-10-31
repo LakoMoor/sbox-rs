@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+    <RoslynDir Condition="'$(RoslynDir)'==''">$(NetCoreTargetingPackRoot)/../sdk/$(NETCoreSdkVersion)/Roslyn/bincore</RoslynDir>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="Microsoft.CodeAnalysis"><HintPath>$(RoslynDir)/Microsoft.CodeAnalysis.dll</HintPath></Reference>
+    <Reference Include="Microsoft.CodeAnalysis.CSharp"><HintPath>$(RoslynDir)/Microsoft.CodeAnalysis.CSharp.dll</HintPath></Reference>
+  </ItemGroup>
+</Project>

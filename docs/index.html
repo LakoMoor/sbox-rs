@@ -52,8 +52,13 @@
   <section>
     <h2>Скриншоты</h2>
     <div class="shots">
-      <figure><img src="img/demo-scene.png" alt="Демо-сцена"><figcaption>Демо-сцена: направленный и точечный свет, глубина, иерархия объектов.</figcaption></figure>
+      <figure><img src="img/demo-scene.png" alt="Демо-сцена"><figcaption>Демо-сцена: направленный и точечный свет, тени, иерархия объектов.</figcaption></figure>
       <figure><img src="img/demo-scene-2.png" alt="Демо-сцена, другой момент"><figcaption>Тот же кадр спустя 4 секунды симуляции (компоненты <code>Spinner</code>).</figcaption></figure>
+      <figure><img src="img/ssr.png" alt="Отражения в экранном пространстве"><figcaption>Отражения в экранном пространстве (<code>--ssr</code>): пол и шары отражают сцену.</figcaption></figure>
+      <figure><img src="img/glass-0.png" alt="Стеклянная панель целая"><figcaption><code>--glass-demo</code>: панель <code>func_shatterglass</code> и шар, летящий на неё.</figcaption></figure>
+      <figure><img src="img/glass-1.png" alt="Панель разбита на осколки"><figcaption>Через 1,5 с: 16 осколков, шар пролетел насквозь.</figcaption></figure>
+      <figure><img src="img/dotnet-0.png" alt="Razor-страница в мире"><figcaption><code>--dotnet --world-panel docs/demo/dice.razor</code>: страница <code>WorldPanel</code> с блоком <code>@code</code> на оригинальном C#.</figcaption></figure>
+      <figure><img src="img/dotnet-1.png" alt="После клика"><figcaption>Клик лучом камеры по кнопке: Roslyn выполнил <code>Roll()</code> (LINQ, лямбды, <code>Log.Info</code>), значения и вычисляемое свойство обновились.</figcaption></figure>
     </div>
     <p style="color:var(--dim);font-size:14px">Кадры отрисованы самим рендерером без захвата экрана: <code>sbox-app --screenshot out.png</code>. Ассеты игры в репозиторий не входят.</p>
   </section>
@@ -67,10 +72,10 @@
       <tr><td><code>sbox-resource</code></td><td>Контейнер <code>*_c</code>, бинарный KV3, текстуры <code>vtex_c</code> (BC1–7, LZ4/ZSTD), VBIB (meshopt), меши <code>vmdl_c</code></td><td class="ok">проверено на 6878 файлах</td></tr>
       <tr><td><code>sbox-render</code></td><td>wgpu: меши, направленный и точечные источники, глубина, off-screen рендер</td><td class="ok">базовый</td></tr>
       <tr><td>Материалы <code>vmat_c</code></td><td>Цвет/тинт/UV-масштаб и BC-текстуры в рендерере</td><td class="ok">базовый</td></tr>
-      <tr><td>Шейдеры, PBR, нормал-мапы, тени</td><td><code>.shader_c</code> и остальные параметры материалов</td><td class="todo">не начато</td></tr>
-      <tr><td>Скелеты и анимации</td><td><code>anim_c</code>, скиннинг</td><td class="todo">не начато</td></tr>
-      <tr><td>Физика, звук, ввод, сеть, UI</td><td>rapier, vsnd_c, Input, Networking, Razor</td><td class="todo">не начато</td></tr>
-      <tr><td>Скриптинг</td><td>Игровой код s&amp;box написан на C# — нужно решение: Rust-API или встроенный .NET</td><td class="todo">не решено</td></tr>
+      <tr><td>Шейдеры, PBR, тени, SSAO / SSR</td><td><code>.shader_c</code> не транслируется: PBR и приближения по семействам (кожа, вода, стекло, глаза)</td><td class="ok">приближения, без сверки с эталоном</td></tr>
+      <tr><td>Скелеты и анимации</td><td><code>anim_c</code>, GPU-скиннинг, графы анимации в упрощённом виде, рэгдоллы</td><td class="ok">базовый</td></tr>
+      <tr><td>Физика, звук, ввод, сеть, UI</td><td>rapier (тела, суставы, рэгдоллы), звук, UDP-сеть с предсказанием и дельта-снимками, Razor-страницы и <code>WorldPanel</code></td><td class="ok">базовый, проверено на скриншотах</td></tr>
+      <tr><td><code>sbox-dotnet</code></td><td>Встроенный .NET (hostfxr + Roslyn из SDK): блок <code>@code</code> страниц Razor исполняется как оригинальный C#; флаг <code>--dotnet</code></td><td class="ok">работает, покрыты поля, свойства, методы, LINQ, лямбды, <code>Log</code></td></tr>
     </table>
     <p>Проверка форматов на реальных файлах: контейнер 6878/6878, KV3 6999/7014 блоков, текстуры 2618/2618 (размеры мипов совпадают до байта), модели 743/744.</p>
     <p><strong>Важно:</strong> это не полный порт и не замена движка. Исходный s&amp;box — около миллиона строк C# поверх закрытого ядра Source 2; здесь воспроизводятся форматы и базовый рантайм.</p>

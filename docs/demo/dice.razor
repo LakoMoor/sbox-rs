@@ -1,0 +1,31 @@
+<root>
+    <div class="panel">
+        <h1>Original C# in a Razor page</h1>
+        <p>@Summary</p>
+        <label>Rolls: @Rolls   Best: @Best</label>
+        <button onclick=@Roll>Roll</button>
+    </div>
+</root>
+
+<style>
+    .panel { background-color: #1d2733; padding: 24px; gap: 12px; width: 520px; }
+    h1 { color: #ffd166; font-size: 30px; }
+    p, label { color: #e6edf3; font-size: 22px; }
+    button { background-color: #3b6ea5; color: white; font-size: 24px; padding: 10px; }
+</style>
+
+@code {
+    int Rolls = 0;
+    int Best = 0;
+    int seed = 7;
+
+    string Summary => string.Join(" + ", Enumerable.Range(1, Math.Min(Rolls, 5)).Select(i => (seed * i) % 6 + 1));
+
+    void Roll()
+    {
+        Rolls++;
+        seed = (seed * 31 + Rolls) % 97;
+        Best = Enumerable.Range(1, Math.Min(Rolls, 5)).Select(i => (seed * i) % 6 + 1).Max();
+        Log.Info($"roll {Rolls} seed {seed} best {Best}");
+    }
+}
