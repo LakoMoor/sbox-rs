@@ -836,6 +836,17 @@ impl ApplicationHandler for App {
                 self.scene.tick(1.0 / 60.0);
             }
             let flag = |name: &str| args.iter().position(|a| a == name).and_then(|j| args.get(j + 1)).and_then(|v| v.parse::<f32>().ok());
+            // `--cam-zoom <k>` moves the camera k times closer to the point it looks at (the model centre, or `--cam-target x y z`).
+            if let (Some(c), Some(k)) = (self.camera, flag("--cam-zoom")) {
+                let t = self.scene.world_transform(c);
+                let target = args.iter().position(|a| a == "--cam-target").map_or(Vec3::ZERO, |i| {
+                    let g = |o: usize| args.get(i + o).and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.0);
+                    Vec3::new(g(1), g(2), g(3))
+                });
+                let mut n = t;
+                n.position = target + (t.position - target) / k.max(0.01);
+                self.scene.set_world_transform(c, n);
+            }
             if let (Some(c), Some(yaw)) = (self.camera, flag("--cam-yaw")) {
                 // Swing the camera round the origin (where model viewers centre the model) and keep looking at it.
                 let t = self.scene.world_transform(c);
