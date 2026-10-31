@@ -259,6 +259,13 @@ fn net_rpcs() -> sbox_net::rpc::Registry<Scene> {
     r
 }
 
+/// `--auto-walk [seconds]`: hold Forward for that many seconds (default: for ever) after the start.
+fn auto_walk_active(elapsed: f32) -> bool {
+    let args: Vec<String> = std::env::args().collect();
+    let Some(i) = args.iter().position(|a| a == "--auto-walk") else { return false };
+    args.get(i + 1).and_then(|v| v.parse::<f32>().ok()).map_or(true, |secs| elapsed < secs)
+}
+
 /// `--host <addr>` serves the physics props to clients; `--join <addr>` mirrors a server's props.
 enum Net {
     Host(sbox_net::Server, sbox_net::replication::RemotePlayers),
@@ -563,7 +570,7 @@ impl App {
                     // Movement from the key actions and the look direction of the local camera, predicted locally.
                     let input = self.scene.resource::<Input>().cloned().unwrap_or_default();
                     let yaw = self.camera.map_or(0.0, |c| self.scene.world_transform(c).rotation.angles().yaw);
-                    let predicted = prediction.step(client, [if std::env::args().any(|a| a == "--auto-walk") { 1.0 } else { input.axis("Forward", "Backward") }, input.axis("Left", "Right")], yaw, 0.0, 0, dt);
+                    let predicted = prediction.step(client, [if auto_walk_active(self.scene.time as f32) { 1.0 } else { input.axis("Forward", "Backward") }, input.axis("Left", "Right")], yaw, 0.0, 0, dt);
                     if let Some(p) = predicted {
                         let go = self.scene.iter_components::<sbox_net::replication::NetworkId>().find(|(_, n)| Some(n.0) == own).map(|(go, _)| go);
                         if let Some(go) = go {
