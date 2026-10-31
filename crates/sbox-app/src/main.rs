@@ -559,7 +559,7 @@ impl App {
                     // Movement from the key actions and the look direction of the local camera, predicted locally.
                     let input = self.scene.resource::<Input>().cloned().unwrap_or_default();
                     let yaw = self.camera.map_or(0.0, |c| self.scene.world_transform(c).rotation.angles().yaw);
-                    let predicted = prediction.step(client, [input.axis("Forward", "Backward"), input.axis("Left", "Right")], yaw, 0.0, 0, dt);
+                    let predicted = prediction.step(client, [if std::env::args().any(|a| a == "--auto-walk") { 1.0 } else { input.axis("Forward", "Backward") }, input.axis("Left", "Right")], yaw, 0.0, 0, dt);
                     if let Some(p) = predicted {
                         let go = self.scene.iter_components::<sbox_net::replication::NetworkId>().find(|(_, n)| Some(n.0) == own).map(|(go, _)| go);
                         if let Some(go) = go {
