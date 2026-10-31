@@ -25,6 +25,8 @@ pub struct Page {
     pub opacity: f32,
     pub scale: f32,
     handlers: HashMap<String, Handler>,
+    /// `=>` properties of the page's code, evaluated into the values each time the page is laid out.
+    computed: Vec<(String, crate::csharp::Expr)>,
     /// Where the page's widgets sit in the UI vectors, so a re-layout replaces them and leaves the rest alone.
     panels: Range<usize>,
     labels: Range<usize>,
@@ -37,12 +39,13 @@ impl Page {
     pub fn new(doc: Document, values: HashMap<String, String>) -> Self {
         let program = doc.code.as_deref().map(crate::csharp::parse);
         let mut values = values;
-        let mut p = Self { doc, values: HashMap::new(), opacity: 1.0, scale: 1.0, handlers: HashMap::new(), panels: 0..0, labels: 0..0, buttons: 0..0, areas: 0 };
+        let mut p = Self { doc, values: HashMap::new(), computed: Vec::new(), opacity: 1.0, scale: 1.0, handlers: HashMap::new(), panels: 0..0, labels: 0..0, buttons: 0..0, areas: 0 };
         // Fields of the page's `@code` block give starting values (explicit ones win); its simple methods become handlers.
         if let Some(prog) = program {
             for (k, v) in prog.fields {
                 values.entry(k).or_insert(v);
             }
+            p.computed = prog.computed;
             for (name, stmts) in prog.methods {
                 p.on(&name, move |v| {
                     crate::csharp::run(&stmts, v);
@@ -91,9 +94,19 @@ impl Page {
         Some(handler(&mut self.values))
     }
 
+    /// The values with the computed properties evaluated on top (what the markup sees).
+    fn view_values(&self) -> HashMap<String, String> {
+        let mut v = self.values.clone();
+        for (name, e) in &self.computed {
+            let x = crate::csharp::eval(e, &v);
+            v.insert(name.clone(), x);
+        }
+        v
+    }
+
     /// The page laid out at `width` pixels from the origin, with the current values (for drawing it somewhere other than the screen).
     pub fn items(&self, width: f32) -> Vec<Item> {
-        razor_ui::layout_bound(&self.doc, 0.0, 0.0, width, &self.values).0
+        razor_ui::layout_bound(&self.doc, 0.0, 0.0, width, &self.view_values()).0
     }
 
     /// (Re)build the page's widgets: whatever an earlier call added is removed first.
@@ -104,7 +117,7 @@ impl Page {
         ui.areas.truncate(self.areas);
         let (k, a) = (self.scale, self.opacity);
         // Laid out at 1x and then scaled, so the page keeps its proportions.
-        let (items, content) = razor_ui::layout_bound(&self.doc, 40.0, 40.0, 520.0, &self.values);
+        let (items, content) = razor_ui::layout_bound(&self.doc, 40.0, 40.0, 520.0, &self.view_values());
         ui.content_height = (40.0 + content + 40.0) * k;
         let r4 = |r: [f32; 4]| [r[0] * k, r[1] * k, r[2] * k, r[3] * k];
         let fade = |c: [f32; 4]| [c[0], c[1], c[2], c[3] * a];
@@ -230,6 +243,19 @@ mod tests {
         assert_eq!(p.values["Score"], "15");
         p.click("Increment");
         assert_eq!(p.values["Score"], "0", "the page's method wins over the built-in demo handler");
+        let mut q = page("<root>@Label</root>
+@code
+{
+    int N = 2;
+    string Label => $\"N={N}\";
+    void Up() { N++; }
+}
+");
+        q.on("Up2", |_| Effect::None);
+        let texts = |p: &Page| -> Vec<String> { p.items(400.0).into_iter().filter_map(|i| if let Item::Text { text, .. } = i { Some(text) } else { None }).collect() };
+        assert_eq!(texts(&q), ["N=2"]);
+        q.click("Up");
+        assert_eq!(texts(&q), ["N=3"], "computed properties follow the values");
     }
 
     #[test]
@@ -287,7 +313,7 @@ mod tests {
     fn changed_values_change_the_layout() {
         let mut p = page("<root><p>@if (Show) {<b>on</b>} else {<i>off</i>}</p></root>");
         let text = |p: &Page| -> Vec<String> {
-            razor_ui::layout_bound(&p.doc, 0.0, 0.0, 400.0, &p.values).0.into_iter().filter_map(|i| if let Item::Text { text, .. } = i { Some(text) } else { None }).collect()
+            razor_ui::layout_bound(&p.doc, 0.0, 0.0, 400.0, &p.view_values()).0.into_iter().filter_map(|i| if let Item::Text { text, .. } = i { Some(text) } else { None }).collect()
         };
         assert_eq!(text(&p), vec!["off"]);
         p.click("Toggle");

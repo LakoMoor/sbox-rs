@@ -19,11 +19,15 @@ pub enum Expr {
     Var(String),
     Not(String),
     Bin(Box<Expr>, char, Box<Expr>),
+    /// `$"text {Name} text"`: literal pieces and value names.
+    Interp(Vec<Result<String, String>>),
 }
 
 pub struct Program {
     pub fields: Vec<(String, String)>,
     pub methods: HashMap<String, Vec<Stmt>>,
+    /// Read-only `T Name => expr;` properties, evaluated against the current values whenever the page is drawn.
+    pub computed: Vec<(String, Expr)>,
 }
 
 fn is_ident(s: &str) -> bool {
@@ -46,6 +50,25 @@ fn expr(s: &str) -> Option<Expr> {
     let s = s.trim();
     if let Some(l) = literal(s) {
         return Some(Expr::Lit(l));
+    }
+    if let Some(body) = s.strip_prefix("$\"").and_then(|r| r.strip_suffix('"')) {
+        let mut parts = Vec::new();
+        let mut rest = body;
+        while let Some(i) = rest.find('{') {
+            if i > 0 {
+                parts.push(Ok(rest[..i].to_string()));
+            }
+            let (name, after) = rest[i + 1..].split_once('}')?;
+            if !is_ident(name.trim()) {
+                return None;
+            }
+            parts.push(Err(name.trim().to_string()));
+            rest = after;
+        }
+        if !rest.is_empty() {
+            parts.push(Ok(rest.to_string()));
+        }
+        return Some(Expr::Interp(parts));
     }
     if let Some(v) = s.strip_prefix('!').map(str::trim).filter(|v| is_ident(v)) {
         return Some(Expr::Not(v.to_string()));
@@ -124,11 +147,20 @@ fn members(code: &str) -> Vec<String> {
 }
 
 pub fn parse(code: &str) -> Program {
-    let mut p = Program { fields: Vec::new(), methods: HashMap::new() };
+    let mut p = Program { fields: Vec::new(), methods: HashMap::new(), computed: Vec::new() };
     for m in members(code) {
         let m = strip_modifiers(m.trim());
         let Some((ty, rest)) = m.split_once(char::is_whitespace) else { continue };
         let rest = rest.trim();
+        // `T Name => expr;`
+        if let Some((head, body)) = rest.split_once("=>") {
+            if ty != "void" && is_ident(head.trim()) {
+                if let Some(e) = expr(body.trim_end_matches(';')) {
+                    p.computed.push((head.trim().to_string(), e));
+                }
+                continue;
+            }
+        }
         if ty == "void" {
             let Some((head, body)) = rest.split_once('(') else { continue };
             let Some((params, body)) = body.split_once(')') else { continue };
@@ -178,8 +210,12 @@ fn show(v: f64) -> String {
     }
 }
 
-fn eval(e: &Expr, v: &Values) -> String {
+pub fn eval(e: &Expr, v: &Values) -> String {
     match e {
+        Expr::Interp(parts) => parts.iter().map(|p| match p {
+            Ok(t) => t.clone(),
+            Err(n) => v.get(n).cloned().unwrap_or_default(),
+        }).collect(),
         Expr::Lit(s) => s.clone(),
         Expr::Var(n) => v.get(n).cloned().unwrap_or_default(),
         Expr::Not(n) => v.get(n).map_or(true, |s| s != "true").to_string(),
@@ -220,6 +256,8 @@ mod tests {
         public void Toggle() => Show = !Show;
         void Reset() { Count = 0; Title = "Reset"; }
         void Add() { Count += 2; Open = true; }
+        string Label => $"Count is {Count}!";
+        int Next => Count + 1;
         void Fancy() { Foo(); }
         void WithArg(int x) { Count = x; }
     "#;
@@ -232,6 +270,11 @@ mod tests {
         let mut m: Vec<_> = p.methods.keys().cloned().collect();
         m.sort();
         assert_eq!(m, ["Add", "Increment", "Reset", "Toggle"], "calls and parameters are not supported");
+        let mut v: Values = p.fields.iter().cloned().collect();
+        let got: Vec<_> = p.computed.iter().map(|(n, e)| format!("{n}={}", eval(e, &v))).collect();
+        assert_eq!(got, ["Label=Count is 3!", "Next=4"]);
+        v.insert("Count".into(), "9".into());
+        assert_eq!(eval(&p.computed[1].1, &v), "10");
     }
 
     /// Over the shipped pages: how many code blocks yield something, and that running every found method never panics.
