@@ -17,6 +17,9 @@ pub fn reconcile(scene: &mut Scene, server: &HashMap<u32, EntityState>, dt: f32)
     scene.with_resource::<Physics, _>(|physics, scene| {
         for (go, target) in props {
             let Some(local) = physics.body_position(go) else { continue };
+            if std::env::var_os("SBOX_NET_DEBUG").is_some() && (local - target).length() > 0.5 {
+                log::info!("prop error {:.1} (local {local:?} server {target:?})", (local - target).length());
+            }
             match correct_prop(local, target, dt) {
                 PropCorrection::Keep => {}
                 PropCorrection::Ease(p) => {
