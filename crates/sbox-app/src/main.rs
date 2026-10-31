@@ -606,6 +606,16 @@ impl App {
                         _ => {}
                     }
                 }
+                // `--remove-prop-after <s>` (host): destroy the networked prop number 2 then, to exercise removal announcements.
+                if let Some(t) = std::env::args().position(|a| a == "--remove-prop-after").and_then(|i| std::env::args().nth(i + 1)).and_then(|v| v.parse::<f64>().ok()) {
+                    if self.scene.time > t {
+                        let gone: Vec<_> = self.scene.iter_components::<sbox_net::replication::NetworkId>().filter(|(_, n)| n.0 == 2).map(|(go, _)| go).collect();
+                        for go in gone {
+                            log::info!("host: removing prop 2");
+                            self.scene.destroy_object(go);
+                        }
+                    }
+                }
                 server.broadcast(&sbox_net::replication::collect(&self.scene));
             }
             Some(Net::Join(client, last_try, prediction, interp)) => {
